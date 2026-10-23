@@ -4,19 +4,18 @@
 активная запись в таблице ``admins`` (список берётся из ``ADMIN_IDS`` в ``.env``
 и расширяется через панель).
 
-Что умеет панель:
+Панель открывается **кнопкой «🛠 Админ-панель» в главном меню** — эта кнопка
+присылается только администраторам (см. :func:`bot.ui.screens.menu_keyboard`).
+Команды ``/admin`` и ``/admins`` оставлены как запасные точки входа.
 
-* ``/admin`` — статистика: всего заявок, ожидают, подтверждено, отклонено,
-  сколько пользователей дали согласие на ПДн и сколько администраторов активно;
-* «📋 Активные брони» — список ``pending``-заявок со страницами и кнопками
-  «✅ Подтвердить» / «❌ Отклонить» по каждой;
-* кнопки под фото чека — решение по конкретной заявке: статус пишется в базу
-  атомарно (только если заявка ещё ``pending``), клиенту уходит уведомление,
-  сообщение администратора обновляется отметкой о решении, а копии остальных
-  администраторов гаснут;
-* ``/admins`` — список администраторов. Владелец (первый ID в ``ADMIN_IDS``)
-  может добавлять администраторов, включать и отключать их, назначать и снимать
-  роль владельца, удалять из списка. Обычный администратор видит список без кнопок.
+Вся навигация по экранам панели (статистика, активные брони, список и карточки
+администраторов) идёт через общий :class:`bot.ui.navigator.Navigator`, поэтому
+панель перерисовывает **одно и то же** сообщение, не плодя ленту в чате.
+В этом модуле лежат действия, которые меняют данные:
+
+* подтверждение / отклонение заявки (под фото чека и из списка броней);
+* добавление нового администратора по Telegram ID;
+* включение / отключение, смена роли и удаление администратора.
 
 Заявки приходят сразу всем активным администраторам — решение принимает тот,
 кто нажал первым; у остальных кнопки заменяются отметкой «обработано …».
@@ -26,16 +25,17 @@ from __future__ import annotations
 
 import logging
 import re
+from typing import Any
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, Message
 
 from bot import texts
 from bot.config import AppConfig
 from bot.db.database import Database
-from bot.db.models import Admin, AdminRole, BookingStatus
+from bot.db.models import AdminRole, BookingStatus
 from bot.filters.access import IsAdmin, IsPrivateChat
 from bot.keyboards.inline import (
     CB_ADMIN_ADD,
@@ -49,17 +49,11 @@ from bot.keyboards.inline import (
     CB_ADMIN_REJECT_PREFIX,
     CB_ADMIN_STATS,
     CB_ADMIN_TOGGLE_PREFIX,
-    PENDING_PAGE_SIZE,
-    admin_add_cancel_keyboard,
-    admin_panel_keyboard,
-    admins_list_keyboard,
-    admins_nav_keyboard,
     parse_admin_decision,
     parse_admin_delete,
     parse_admin_list_page,
     parse_admin_role,
     parse_admin_toggle,
-    pending_list_keyboard,
 )
 from bot.services.admins import AdminRegistry
 from bot.services.notifications import (
@@ -71,14 +65,16 @@ from bot.services.notifications import (
     resolve_decided_by,
     sync_peer_admins,
 )
-from bot.states import AdminFSM
-from bot.utils.formatting import (
-    escape_html,
-    format_datetime,
-    now_full_text,
-    truncate,
+from bot.states import (
+    DATA_SCREEN,
+    DATA_SCREEN_MESSAGE,
+    DATA_SCREEN_STACK,
+    AdminFSM,
 )
-from bot.utils.telegram import edit_or_send, safe_edit_message_caption
+from bot.ui.navigator import Navigator
+from bot.ui.screens import Screen
+from bot.utils.formatting import escape_html, truncate
+from bot.utils.telegram import safe_delete_message, safe_edit_message_caption
 
 logger = logging.getLogger(__name__)
 
@@ -91,64 +87,38 @@ _ADMIN_ID_RE = re.compile(r"^\d{3,}$")
 
 
 # --------------------------------------------------------------------------- #
-# Вспомогательные функции отрисовки
+# Вспомогательные функции
 # --------------------------------------------------------------------------- #
-async def _stats_text(db: Database, cfg: AppConfig) -> str:
-    """Текст панели со статистикой (используется и /admin, и кнопка обновления)."""
-    stats = await db.get_stats()
-    return texts.render(
-        texts.ADMIN_PANEL_GREETING,
-        cfg.club,
-        stats=texts.STATS_TEMPLATE.format(now=now_full_text(cfg.timezone), **stats.as_dict()),
-    )
-
-
-async def _render_pending(
+def _navigate(
+    event: Message | CallbackQuery,
+    *,
     db: Database,
     cfg: AppConfig,
-    page: int,
-) -> tuple[str, InlineKeyboardMarkup]:
-    """Собрать текст и клавиатуру страницы списка активных (``pending``) заявок."""
-    total = await db.count_bookings(BookingStatus.PENDING)
-    if total == 0:
-        return texts.PENDING_EMPTY, admin_panel_keyboard()
+    state: FSMContext,
+    admins: AdminRegistry | None = None,
+) -> Navigator:
+    """Собрать навигатор под событие администратора."""
+    if isinstance(event, CallbackQuery):
+        return Navigator.from_callback(event, db=db, cfg=cfg, state=state, admins=admins)
+    return Navigator.from_message(event, db=db, cfg=cfg, state=state, admins=admins)
 
-    pages = max(1, (total + PENDING_PAGE_SIZE - 1) // PENDING_PAGE_SIZE)
-    page = min(max(page, 0), pages - 1)
 
-    entries = await db.list_bookings_with_users(
-        BookingStatus.PENDING,
-        limit=PENDING_PAGE_SIZE,
-        offset=page * PENDING_PAGE_SIZE,
-        oldest_first=True,
+async def _keep_navigation(state: FSMContext) -> dict[str, Any]:
+    """Сбросить FSM-состояние ввода, сохранив экран и стек переходов."""
+    data = await state.get_data()
+    await state.clear()
+    await state.update_data(
+        **{
+            DATA_SCREEN: data.get(DATA_SCREEN),
+            DATA_SCREEN_STACK: data.get(DATA_SCREEN_STACK) or [],
+            DATA_SCREEN_MESSAGE: data.get(DATA_SCREEN_MESSAGE),
+        }
     )
-
-    blocks = [
-        texts.PENDING_LIST_HEADER.format(count=total, page=page + 1, pages=pages),
-    ]
-    for booking, user in entries:
-        user_link = user.link if user is not None else f"ID: <code>{booking.user_id}</code>"
-        blocks.append(
-            texts.PENDING_ITEM.format(
-                booking_id=booking.id,
-                tariff=escape_html(booking.tariff),
-                time_slot=escape_html(booking.time_slot),
-                client_name=escape_html(booking.client_name),
-                user_link=user_link,
-                created_at=format_datetime(booking.created_at, cfg.timezone),
-            )
-        )
-
-    keyboard = pending_list_keyboard([booking for booking, _ in entries], page, pages)
-    return "\n\n".join(blocks), keyboard
+    return data
 
 
 async def _admin_label(bot: Bot, db: Database, user_id: int) -> str:
-    """Как показать администратора в списке: «@nickname», «Имя (ID: …)».
-
-    Администратор мог быть добавлен по ID и ещё ни разу не писать боту — тогда
-    в таблице ``users`` его нет, пробуем спросить профиль у Telegram.
-    """
+    """Как показать администратора в уведомлениях: «@nickname», «Имя (ID: …)»."""
     stored = await db.get_user(user_id)
     if stored is not None:
         return stored.link
@@ -168,6 +138,7 @@ async def _admin_label(bot: Bot, db: Database, user_id: int) -> str:
 
 async def _is_owner(
     db: Database,
+    cfg: AppConfig,
     admins: AdminRegistry | None,
     user_id: int | None,
 ) -> bool:
@@ -177,110 +148,10 @@ async def _is_owner(
     if admins is not None:
         return await admins.is_owner(user_id)
     admin = await db.get_admin(user_id)
-    return admin is not None and admin.is_owner
-
-
-async def _render_admins(
-    bot: Bot,
-    db: Database,
-    cfg: AppConfig,
-    *,
-    viewer_id: int | None,
-) -> tuple[str, InlineKeyboardMarkup]:
-    """Текст и клавиатура раздела «👥 Администраторы»."""
-    admins = await db.list_admins()
-    viewer_is_owner = await _is_owner(db, None, viewer_id)
-
-    if not admins:
-        blocks = [texts.ADMINS_EMPTY]
-    else:
-        total, active = await db.count_admins()
-        blocks = [texts.ADMINS_LIST_HEADER.format(total=total, active=active)]
-        for index, admin in enumerate(admins, start=1):
-            blocks.append(await _render_admin_item(bot, db, admin, index))
-            if admin.user_id == cfg.admin_id:
-                blocks.append(texts.ADMINS_OWNER_ENV_NOTE)
-
-    if not viewer_is_owner:
-        viewer = await db.get_admin(viewer_id) if viewer_id else None
-        role = viewer.role_title if viewer is not None else AdminRole.title(AdminRole.OPERATOR)
-        blocks.append(texts.ADMIN_MANAGE_FORBIDDEN.format(role=role))
-
-    keyboard = admins_list_keyboard(
-        admins,
-        env_owner_id=cfg.admin_id,
-        viewer_is_owner=viewer_is_owner,
-    )
-    return "\n\n".join(blocks), keyboard
-
-
-async def _render_admin_item(bot: Bot, db: Database, admin: Admin, index: int) -> str:
-    """Одна строка списка администраторов."""
-    state = texts.ADMINS_STATE_ACTIVE if admin.is_active else texts.ADMINS_STATE_DISABLED
-    label = await _admin_label(bot, db, admin.user_id)
-    item = texts.ADMINS_ITEM.format(
-        index=index,
-        user_link=label,
-        user_id=admin.user_id,
-        role=admin.role_title,
-        state=state,
-        added="",
-    )
-    if admin.added_by:
-        added_by = await _admin_label(bot, db, admin.added_by)
-        item += texts.ADMINS_ITEM_ADDED.format(added_by=added_by)
-    return item
-
-
-async def _apply_admin_view(
-    bot: Bot,
-    db: Database,
-    cfg: AppConfig,
-    callback: CallbackQuery,
-    note: str,
-) -> None:
-    """Обновить сообщение администратора после решения по заявке.
-
-    * если это фото чека — дописываем отметку в подпись и убираем кнопки;
-    * если это текстовый список заявок — перерисовываем первую страницу списка
-      (обработанная заявка из него исчезает).
-    """
-    message = callback.message
-    chat_id, message_id = message.chat.id, message.message_id
-
-    if getattr(message, "photo", None):
-        caption = getattr(message, "caption", "") or ""
-        if note.strip() in caption:  # отметка уже есть — не дублируем
-            return
-        updated = truncate(caption + note, CAPTION_LIMIT)
-        if not await safe_edit_message_caption(bot, chat_id, message_id, updated):
-            await bot.send_message(chat_id=chat_id, text=truncate(note.strip(), MESSAGE_LIMIT))
-        return
-
-    text, keyboard = await _render_pending(db, cfg, 0)
-    await edit_or_send(bot, chat_id, message_id, truncate(text, MESSAGE_LIMIT), keyboard)
-
-
-async def _refresh_admins_view(
-    bot: Bot,
-    db: Database,
-    cfg: AppConfig,
-    callback: CallbackQuery,
-    note: str | None = None,
-) -> None:
-    """Перерисовать список администраторов в том же сообщении и ответить на клик."""
-    text, keyboard = await _render_admins(bot, db, cfg, viewer_id=callback.from_user.id)
-    await edit_or_send(
-        bot,
-        callback.message.chat.id,
-        callback.message.message_id,
-        truncate(text, MESSAGE_LIMIT),
-        keyboard,
-    )
-    if note:
-        await callback.answer(truncate(note, CALLBACK_ANSWER_LIMIT))
-    else:
-        await callback.answer()
+    if admin is not None:
+        return admin.is_owner
+    total, _ = await db.count_admins()
+    return total == 0 and user_id == cfg.admin_id
 
 
 async def _deny_management(
@@ -297,122 +168,178 @@ async def _deny_management(
     )
 
 
+async def _apply_admin_view(
+    bot: Bot,
+    db: Database,
+    cfg: AppConfig,
+    state: FSMContext,
+    callback: CallbackQuery,
+    note: str,
+    admins: AdminRegistry | None = None,
+) -> None:
+    """Обновить сообщение администратора после решения по заявке.
+
+    * если это фото чека — дописываем отметку в подпись и убираем кнопки;
+    * если это текстовый экран «Активные брони» — перерисовываем его (заявка
+      исчезает из списка без нового сообщения).
+    """
+    message = callback.message
+    chat_id, message_id = message.chat.id, message.message_id
+
+    if getattr(message, "photo", None):
+        caption = getattr(message, "caption", "") or ""
+        if note.strip() in caption:  # отметка уже есть — не дублируем
+            return
+        updated = truncate(caption + note, CAPTION_LIMIT)
+        if not await safe_edit_message_caption(bot, chat_id, message_id, updated):
+            await bot.send_message(chat_id=chat_id, text=truncate(note.strip(), MESSAGE_LIMIT))
+        return
+
+    navigator = _navigate(callback, db=db, cfg=cfg, state=state, admins=admins)
+    await navigator.show(Screen.ADMIN_PENDING, 0, push=False)
+
+
 # --------------------------------------------------------------------------- #
-# Команда /admin — статистика
+# Команды-точки входа (/admin, /admins) и старые callback-и совместимости
 # --------------------------------------------------------------------------- #
 @router.message(Command("admin", "stats"))
-async def cmd_admin(message: Message, db: Database, cfg: AppConfig) -> None:
-    """Показать статистику заявок и кнопки панели."""
-    await message.answer(await _stats_text(db, cfg), reply_markup=admin_panel_keyboard())
+async def cmd_admin(
+    message: Message,
+    state: FSMContext,
+    db: Database,
+    cfg: AppConfig,
+    admins: AdminRegistry | None = None,
+) -> None:
+    """Открыть экран админ-панели (запасной вход помимо кнопки в меню)."""
+    await _keep_navigation(state)
+    navigator = _navigate(message, db=db, cfg=cfg, state=state, admins=admins)
+    await state.update_data(**{DATA_SCREEN_STACK: [{"s": Screen.MENU, "a": ""}]})
+    await navigator.show(Screen.ADMIN, push=False)
     logger.info(
-        "Админ-панель: %s запросил статистику",
+        "Админ-панель открыта командой: %s",
+        message.from_user.id if message.from_user else "?",
+    )
+
+
+@router.message(Command("admins", "adminlist"))
+async def cmd_admins(
+    message: Message,
+    state: FSMContext,
+    db: Database,
+    cfg: AppConfig,
+    admins: AdminRegistry | None = None,
+) -> None:
+    """Открыть список администраторов клуба."""
+    await _keep_navigation(state)
+    navigator = _navigate(message, db=db, cfg=cfg, state=state, admins=admins)
+    await state.update_data(
+        **{
+            DATA_SCREEN_STACK: [
+                {"s": Screen.MENU, "a": ""},
+                {"s": Screen.ADMIN, "a": ""},
+            ]
+        }
+    )
+    await navigator.show(Screen.ADMIN_ADMINS, push=False)
+    logger.info(
+        "Список администраторов открыл %s",
         message.from_user.id if message.from_user else "?",
     )
 
 
 @router.callback_query(F.data == CB_ADMIN_STATS)
-async def cb_refresh_stats(callback: CallbackQuery, db: Database, bot: Bot, cfg: AppConfig) -> None:
-    """Кнопка «🔄 Обновить статистику»."""
-    text = await _stats_text(db, cfg)
-    await edit_or_send(
-        bot,
-        callback.message.chat.id,
-        callback.message.message_id,
-        truncate(text, MESSAGE_LIMIT),
-        admin_panel_keyboard(),
-    )
-    await callback.answer("Статистика обновлена")
+async def cb_refresh_stats(
+    callback: CallbackQuery,
+    state: FSMContext,
+    db: Database,
+    cfg: AppConfig,
+    admins: AdminRegistry | None = None,
+) -> None:
+    """Обновить сводку админ-панели (в т. ч. со старых кнопок ``ad:stats``)."""
+    navigator = _navigate(callback, db=db, cfg=cfg, state=state, admins=admins)
+    await navigator.show(Screen.ADMIN, push=False)
+    await navigator.answer("Сводка обновлена")
 
 
 @router.callback_query(F.data.startswith(CB_ADMIN_LIST_PREFIX))
-async def cb_pending_list(callback: CallbackQuery, db: Database, bot: Bot, cfg: AppConfig) -> None:
-    """Кнопка «📋 Активные брони» и постраничная навигация по списку."""
+async def cb_pending_list(
+    callback: CallbackQuery,
+    state: FSMContext,
+    db: Database,
+    cfg: AppConfig,
+    admins: AdminRegistry | None = None,
+) -> None:
+    """Список активных заявок со старых кнопок ``ad:list:<page>``."""
     page = parse_admin_list_page(callback.data) or 0
-    text, keyboard = await _render_pending(db, cfg, page)
-
-    await edit_or_send(
-        bot,
-        callback.message.chat.id,
-        callback.message.message_id,
-        truncate(text, MESSAGE_LIMIT),
-        keyboard,
-    )
-    await callback.answer()
-
-
-# --------------------------------------------------------------------------- #
-# Раздел «👥 Администраторы»
-# --------------------------------------------------------------------------- #
-@router.message(Command("admins", "adminlist"))
-async def cmd_admins(message: Message, db: Database, bot: Bot, cfg: AppConfig) -> None:
-    """Показать список администраторов клуба (кнопки — только владельцу)."""
-    text, keyboard = await _render_admins(
-        bot, db, cfg, viewer_id=message.from_user.id if message.from_user else None
-    )
-    await message.answer(truncate(text, MESSAGE_LIMIT), reply_markup=keyboard)
-    logger.info("Список администраторов открыл %s", message.from_user.id if message.from_user else "?")
+    navigator = _navigate(callback, db=db, cfg=cfg, state=state, admins=admins)
+    await navigator.show(Screen.ADMIN_PENDING, page, push=False)
+    await navigator.answer()
 
 
 @router.callback_query(F.data == CB_ADMIN_ADMINS)
-async def cb_admins_list(callback: CallbackQuery, db: Database, bot: Bot, cfg: AppConfig) -> None:
-    """Кнопка «👥 Администраторы» / «🔄 Обновить»."""
-    text, keyboard = await _render_admins(
-        bot, db, cfg, viewer_id=callback.from_user.id if callback.from_user else None
-    )
-    await edit_or_send(
-        bot,
-        callback.message.chat.id,
-        callback.message.message_id,
-        truncate(text, MESSAGE_LIMIT),
-        keyboard,
-    )
-    await callback.answer()
+async def cb_admins_list(
+    callback: CallbackQuery,
+    state: FSMContext,
+    db: Database,
+    cfg: AppConfig,
+    admins: AdminRegistry | None = None,
+) -> None:
+    """Список администраторов со старых кнопок ``ad:admins``."""
+    navigator = _navigate(callback, db=db, cfg=cfg, state=state, admins=admins)
+    await navigator.show(Screen.ADMIN_ADMINS, push=False)
+    await navigator.answer()
 
 
+# --------------------------------------------------------------------------- #
+# Добавление администратора по ID
+# --------------------------------------------------------------------------- #
 @router.callback_query(F.data == CB_ADMIN_ADD)
 async def cb_admin_add_start(
     callback: CallbackQuery,
-    db: Database,
-    bot: Bot,
     state: FSMContext,
+    db: Database,
+    cfg: AppConfig,
     admins: AdminRegistry | None = None,
 ) -> None:
     """Кнопка «➕ Добавить»: запросить ID нового администратора."""
     user_id = callback.from_user.id if callback.from_user else None
-    if not await _is_owner(db, admins, user_id):
+    if not await _is_owner(db, cfg, admins, user_id):
         await _deny_management(callback, db, user_id)
         return
 
     await state.set_state(AdminFSM.waiting_admin_id)
-    await edit_or_send(
-        bot,
-        callback.message.chat.id,
-        callback.message.message_id,
-        texts.ADMIN_ADD_PROMPT,
-        admin_add_cancel_keyboard(),
-    )
-    await callback.answer("Введите ID нового администратора")
+    navigator = _navigate(callback, db=db, cfg=cfg, state=state, admins=admins)
+    await navigator.show(Screen.ADMIN_ADD)
+    await navigator.answer("Введите ID нового администратора")
 
 
 @router.callback_query(F.data == CB_ADMIN_ADD_CANCEL)
-async def cb_admin_add_cancel(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
-    """Кнопка «❌ Отменить» во время ввода ID."""
-    await state.clear()
-    await edit_or_send(
-        bot,
-        callback.message.chat.id,
-        callback.message.message_id,
-        texts.ADMIN_ADD_CANCELED,
-        admins_nav_keyboard(),
-    )
-    await callback.answer("Добавление отменено")
+async def cb_admin_add_cancel(
+    callback: CallbackQuery,
+    state: FSMContext,
+    db: Database,
+    cfg: AppConfig,
+    admins: AdminRegistry | None = None,
+) -> None:
+    """Кнопка «✕ Отменить» во время ввода ID."""
+    await _keep_navigation(state)
+    navigator = _navigate(callback, db=db, cfg=cfg, state=state, admins=admins)
+    await navigator.show(Screen.ADMIN_ADMINS, push=False, note=texts.ADMIN_ADD_CANCELED)
+    await navigator.answer("Добавление отменено")
 
 
 @router.message(Command("cancel"), AdminFSM.waiting_admin_id)
-async def cmd_cancel_admin(message: Message, state: FSMContext) -> None:
+async def cmd_cancel_admin(
+    message: Message,
+    state: FSMContext,
+    db: Database,
+    cfg: AppConfig,
+    admins: AdminRegistry | None = None,
+) -> None:
     """/cancel во время добавления администратора."""
-    await state.clear()
-    await message.answer(texts.ADMIN_ADD_CANCELED, reply_markup=admins_nav_keyboard())
+    await _keep_navigation(state)
+    navigator = _navigate(message, db=db, cfg=cfg, state=state, admins=admins)
+    await navigator.show(Screen.ADMIN_ADMINS, push=False, note=texts.ADMIN_ADD_CANCELED)
 
 
 @router.message(AdminFSM.waiting_admin_id, ~F.text.startswith("/"))
@@ -425,14 +352,17 @@ async def msg_admin_id(
     admins: AdminRegistry | None = None,
 ) -> None:
     """Принять числовой Telegram ID нового администратора."""
+    navigator = _navigate(message, db=db, cfg=cfg, state=state, admins=admins)
     raw = (message.text or "").strip()
+    await safe_delete_message(bot, navigator.user_id, message.message_id)
+
     if not _ADMIN_ID_RE.match(raw):
-        await message.answer(texts.ADMIN_ADD_INVALID_ID)
+        await navigator.show(Screen.ADMIN_ADD, push=False, note=texts.ADMIN_ADD_INVALID_ID)
         return
 
     admin_id = int(raw)
     operator_id = message.from_user.id if message.from_user else None
-    await state.clear()
+    await _keep_navigation(state)
 
     existing = await db.get_admin(admin_id)
     label = await _admin_label(bot, db, admin_id)
@@ -441,9 +371,9 @@ async def msg_admin_id(
         admin = await db.add_admin(admin_id, role=AdminRole.OPERATOR, added_by=operator_id)
         if admins is not None:
             admins.remember(admin_id)
-        answer = texts.ADMIN_ADDED.format(user_link=label, user_id=admin.user_id, role=admin.role_title)
+        note = texts.ADMIN_ADDED.format(user_link=label, user_id=admin.user_id, role=admin.role_title)
         if await db.get_user(admin_id) is None:
-            answer += "\n\n" + texts.ADMIN_NOT_STARTED_WARNING.format(user_link=label)
+            note += "\n\n" + texts.ADMIN_NOT_STARTED_WARNING.format(user_link=label)
         logger.info("Администратор %s добавлен пользователем %s", admin_id, operator_id)
     else:
         admin = await db.add_admin(
@@ -453,24 +383,40 @@ async def msg_admin_id(
         )
         if admins is not None:
             admins.remember(admin_id)
-        answer = texts.ADMIN_ALREADY_EXISTS.format(
+        note = texts.ADMIN_ALREADY_EXISTS.format(
             user_link=label,
+            user_id=admin.user_id,
             role=admin.role_title,
             state=texts.ADMINS_STATE_ACTIVE if admin.is_active else texts.ADMINS_STATE_DISABLED,
         )
         logger.info("Администратор %s уже был в списке — включён снова", admin_id)
 
-    await message.answer(truncate(answer, MESSAGE_LIMIT))
-    text, keyboard = await _render_admins(bot, db, cfg, viewer_id=operator_id)
-    await message.answer(truncate(text, MESSAGE_LIMIT), reply_markup=keyboard)
+    await navigator.show(Screen.ADMIN_ADMINS, push=False, note=note)
 
 
 # --------------------------------------------------------------------------- #
 # Включение/отключение, смена роли, удаление администратора
 # --------------------------------------------------------------------------- #
+async def _refresh_after_manage(
+    navigator: Navigator,
+    target_id: int,
+    note: str,
+    *,
+    deleted: bool = False,
+) -> None:
+    """После правки администратора остаёмся на том же экране (карточка / список)."""
+    current = (await navigator.current()).get("s")
+    if deleted or current != Screen.ADMIN_ADMIN:
+        await navigator.show(Screen.ADMIN_ADMINS, push=False)
+    else:
+        await navigator.show(Screen.ADMIN_ADMIN, target_id, push=False)
+    await navigator.answer(note)
+
+
 @router.callback_query(F.data.startswith(CB_ADMIN_TOGGLE_PREFIX))
 async def cb_admin_toggle(
     callback: CallbackQuery,
+    state: FSMContext,
     db: Database,
     bot: Bot,
     cfg: AppConfig,
@@ -482,24 +428,26 @@ async def cb_admin_toggle(
     if target is None:
         await callback.answer("Некорректная кнопка", show_alert=True)
         return
-    if not await _is_owner(db, admins, user_id):
+    if not await _is_owner(db, cfg, admins, user_id):
         await _deny_management(callback, db, user_id)
         return
 
+    navigator = _navigate(callback, db=db, cfg=cfg, state=state, admins=admins)
     admin = await db.get_admin(target)
     if admin is None:
-        await _refresh_admins_view(bot, db, cfg, callback, "Администратор не найден — список обновлён")
+        await navigator.show(Screen.ADMIN_ADMINS, push=False)
+        await navigator.answer("Администратор не найден — список обновлён")
         return
     if target == cfg.admin_id:
-        await callback.answer(truncate(texts.ADMIN_OWNER_PROTECTED, CALLBACK_ANSWER_LIMIT), show_alert=True)
+        await navigator.alert(
+            texts.ADMIN_OWNER_PROTECTED.format(user_link=await _admin_label(bot, db, target))
+        )
         return
     if target == user_id:
-        await callback.answer(truncate(texts.ADMIN_SELF_PROTECTED, CALLBACK_ANSWER_LIMIT), show_alert=True)
+        await navigator.alert(texts.ADMIN_SELF_PROTECTED)
         return
     if admin.is_owner and admin.is_active and await db.count_active_owners() <= 1:
-        await callback.answer(
-            truncate(texts.ADMIN_LAST_OWNER_PROTECTED, CALLBACK_ANSWER_LIMIT), show_alert=True
-        )
+        await navigator.alert(texts.ADMIN_LAST_OWNER_PROTECTED)
         return
 
     make_active = not admin.is_active
@@ -515,42 +463,45 @@ async def cb_admin_toggle(
         "включён" if make_active else "отключён",
         user_id,
     )
-    await _refresh_admins_view(bot, db, cfg, callback, note)
+    await _refresh_after_manage(navigator, target, note)
 
 
 @router.callback_query(F.data.startswith((CB_ADMIN_PROMOTE_PREFIX, CB_ADMIN_DEMOTE_PREFIX)))
 async def cb_admin_role(
     callback: CallbackQuery,
+    state: FSMContext,
     db: Database,
     bot: Bot,
     cfg: AppConfig,
     admins: AdminRegistry | None = None,
 ) -> None:
-    """Кнопки «👑 Владелец» / «👤 Оператор» — смена роли."""
+    """Кнопки смены роли: «👑 Владелец» / «👤 Оператор»."""
     user_id = callback.from_user.id if callback.from_user else None
     parsed = parse_admin_role(callback.data)
     if parsed is None:
         await callback.answer("Некорректная кнопка", show_alert=True)
         return
     new_role, target = parsed
-    if not await _is_owner(db, admins, user_id):
+    if not await _is_owner(db, cfg, admins, user_id):
         await _deny_management(callback, db, user_id)
         return
 
+    navigator = _navigate(callback, db=db, cfg=cfg, state=state, admins=admins)
     admin = await db.get_admin(target)
     if admin is None:
-        await _refresh_admins_view(bot, db, cfg, callback, "Администратор не найден — список обновлён")
+        await navigator.show(Screen.ADMIN_ADMINS, push=False)
+        await navigator.answer("Администратор не найден — список обновлён")
         return
     if target == cfg.admin_id:
-        await callback.answer(truncate(texts.ADMIN_OWNER_PROTECTED, CALLBACK_ANSWER_LIMIT), show_alert=True)
+        await navigator.alert(
+            texts.ADMIN_OWNER_PROTECTED.format(user_link=await _admin_label(bot, db, target))
+        )
         return
     if admin.role == new_role:
-        await _refresh_admins_view(bot, db, cfg, callback, f"Роль уже «{admin.role_title}»")
+        await _refresh_after_manage(navigator, target, f"Роль уже «{admin.role_title}»")
         return
     if new_role == AdminRole.OPERATOR and await db.count_active_owners() <= 1:
-        await callback.answer(
-            truncate(texts.ADMIN_LAST_OWNER_PROTECTED, CALLBACK_ANSWER_LIMIT), show_alert=True
-        )
+        await navigator.alert(texts.ADMIN_LAST_OWNER_PROTECTED)
         return
 
     await db.set_admin_role(target, new_role)
@@ -559,12 +510,13 @@ async def cb_admin_role(
         texts.ADMIN_ROLE_PROMOTED if new_role == AdminRole.OWNER else texts.ADMIN_ROLE_DEMOTED
     ).format(user_link=label)
     logger.info("Администратор %s получил роль %s от %s", target, new_role, user_id)
-    await _refresh_admins_view(bot, db, cfg, callback, note)
+    await _refresh_after_manage(navigator, target, note)
 
 
 @router.callback_query(F.data.startswith(CB_ADMIN_DELETE_PREFIX))
 async def cb_admin_delete(
     callback: CallbackQuery,
+    state: FSMContext,
     db: Database,
     bot: Bot,
     cfg: AppConfig,
@@ -576,24 +528,26 @@ async def cb_admin_delete(
     if target is None:
         await callback.answer("Некорректная кнопка", show_alert=True)
         return
-    if not await _is_owner(db, admins, user_id):
+    if not await _is_owner(db, cfg, admins, user_id):
         await _deny_management(callback, db, user_id)
         return
 
+    navigator = _navigate(callback, db=db, cfg=cfg, state=state, admins=admins)
     admin = await db.get_admin(target)
     if admin is None:
-        await _refresh_admins_view(bot, db, cfg, callback, "Администратор не найден — список обновлён")
+        await navigator.show(Screen.ADMIN_ADMINS, push=False)
+        await navigator.answer("Администратор не найден — список обновлён")
         return
     if target == cfg.admin_id:
-        await callback.answer(truncate(texts.ADMIN_OWNER_PROTECTED, CALLBACK_ANSWER_LIMIT), show_alert=True)
+        await navigator.alert(
+            texts.ADMIN_OWNER_PROTECTED.format(user_link=await _admin_label(bot, db, target))
+        )
         return
     if target == user_id:
-        await callback.answer(truncate(texts.ADMIN_SELF_PROTECTED, CALLBACK_ANSWER_LIMIT), show_alert=True)
+        await navigator.alert(texts.ADMIN_SELF_PROTECTED)
         return
     if admin.is_owner and await db.count_active_owners() <= 1:
-        await callback.answer(
-            truncate(texts.ADMIN_LAST_OWNER_PROTECTED, CALLBACK_ANSWER_LIMIT), show_alert=True
-        )
+        await navigator.alert(texts.ADMIN_LAST_OWNER_PROTECTED)
         return
 
     label = await _admin_label(bot, db, target)
@@ -601,7 +555,7 @@ async def cb_admin_delete(
     if admins is not None:
         admins.forget(target)
     logger.info("Администратор %s удалён пользователем %s", target, user_id)
-    await _refresh_admins_view(bot, db, cfg, callback, texts.ADMIN_REMOVED.format(user_link=label))
+    await _refresh_after_manage(navigator, target, texts.ADMIN_REMOVED.format(user_link=label), deleted=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -610,9 +564,11 @@ async def cb_admin_delete(
 @router.callback_query(F.data.startswith((CB_ADMIN_APPROVE_PREFIX, CB_ADMIN_REJECT_PREFIX)))
 async def cb_decision(
     callback: CallbackQuery,
+    state: FSMContext,
     db: Database,
     bot: Bot,
     cfg: AppConfig,
+    admins: AdminRegistry | None = None,
 ) -> None:
     """Обработать нажатие «✅ Подтвердить» или «❌ Отклонить».
 
@@ -651,11 +607,13 @@ async def cb_decision(
             bot,
             db,
             cfg,
+            state,
             callback,
             texts.ADMIN_ALREADY_PROCESSED_NOTE.format(
                 status=BookingStatus.title(fresh.status),
                 decider=escape_html(decider),
             ),
+            admins,
         )
         return
 
@@ -665,16 +623,16 @@ async def cb_decision(
     decision_text = texts.ADMIN_DECISION_OK if approved else texts.ADMIN_DECISION_NO
     if not delivered:
         decision_text += " Клиенту уведомление не доставлено."
-    await callback.answer(
-        truncate(decision_text.format(booking_id=booking_id), CALLBACK_ANSWER_LIMIT)
-    )
+    await callback.answer(truncate(decision_text.format(booking_id=booking_id), CALLBACK_ANSWER_LIMIT))
 
     await _apply_admin_view(
         bot,
         db,
         cfg,
+        state,
         callback,
         decision_note(cfg, approved, delivered, decided_by),
+        admins,
     )
 
     # Остальным администраторам гасим кнопки: решение уже принято.

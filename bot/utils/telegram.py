@@ -12,7 +12,7 @@ import logging
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardMarkup, ReplyKeyboardRemove
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +75,30 @@ async def edit_or_send(
     if await safe_edit_message_text(bot, chat_id, message_id, text, reply_markup):
         return
     await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+
+
+async def send_screen(
+    bot: Bot,
+    chat_id: int,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+    *,
+    clear_reply_keyboard: bool = False,
+) -> int:
+    """Отправить новое сообщение и вернуть его ``message_id``.
+
+    С ``clear_reply_keyboard`` сначала уходит сообщение с ``ReplyKeyboardRemove``
+    (старая reply-клавиатура скрывается), затем в это же сообщение дописываются
+    inline-кнопки — в чате остаётся ровно одно сообщение, а не два.
+    """
+    if clear_reply_keyboard:
+        sent = await bot.send_message(chat_id=chat_id, text=text, reply_markup=ReplyKeyboardRemove())
+        message_id = int(getattr(sent, "message_id", 0) or 0)
+        if message_id and await safe_edit_message_text(bot, chat_id, message_id, text, reply_markup):
+            return message_id
+
+    sent = await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+    return int(getattr(sent, "message_id", 0) or 0)
 
 
 async def safe_delete_message(bot: Bot, chat_id: int, message_id: int) -> bool:

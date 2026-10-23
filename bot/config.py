@@ -106,6 +106,7 @@ class ClubInfo:
             "club_hours": self.hours,
             "admin_name": self.admin_name,
             "admin_phone": self.admin_phone,
+            "admin_phone_raw": self.admin_phone_raw,
             "payment_system": self.payment_system,
             "payment_card": self.payment_card,
             "payment_holder": self.payment_holder,

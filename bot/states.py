@@ -41,10 +41,21 @@ DATA_CLIENT_NAME: str = "client_name"
 #: Ключ FSM-данных администратора (не используется как значение, только ключ).
 DATA_ADMIN_ID: str = "admin_id"
 
+# --- навигация по экранам (см. bot/ui/navigator.py) -------------------------- #
+#: Текущий экран: {"s": <screen>, "a": <arg>}.
+DATA_SCREEN: str = "screen"
+#: Стек переходов для кнопки «◀ Назад»: список таких же записей.
+DATA_SCREEN_STACK: str = "screen_stack"
+#: ``message_id`` сообщения, которое сейчас является экраном пользователя.
+DATA_SCREEN_MESSAGE: str = "screen_message"
+
 __all__ = [
     "AdminFSM",
     "BookingFSM",
     "DATA_ADMIN_ID",
+    "DATA_SCREEN",
+    "DATA_SCREEN_MESSAGE",
+    "DATA_SCREEN_STACK",
     "DATA_CLIENT_NAME",
     "DATA_TARIFF_KEY",
     "DATA_TIME_KEY",

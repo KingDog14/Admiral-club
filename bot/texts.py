@@ -132,6 +132,117 @@ TARIFFS: tuple[Tariff, ...] = (
 TARIFF_TITLE_BY_KEY: dict[str, str] = {t.key: t.title for t in TARIFFS}
 TARIFF_BY_KEY: dict[str, Tariff] = {t.key: t for t in TARIFFS}
 
+
+@dataclass(frozen=True, slots=True)
+class FaqItem:
+    """Один вопрос часто задаваемых вопросов.
+
+    ``answer`` — шаблон: данные клуба подставляет :func:`render`.
+    Хранится здесь, а не в модулях интерфейса, потому что это текст клуба:
+    и экран «вопрос → ответ», и «бумажная» версия FAQ собираются из одного
+    списка — править ответ нужно ровно в одном месте.
+    """
+
+    key: str
+    emoji: str
+    question: str
+    answer: str
+
+
+#: Вопросы и ответы — по реальной практике клуба (переписка «ADMIRAL | Бронирование»).
+FAQ_ITEMS: tuple[FaqItem, ...] = (
+    FaqItem(
+        key="night",
+        emoji="🌙",
+        question="Во сколько начинается ночь?",
+        answer=(
+            "Ночной пакет — с <b>{night_slot}</b>, оплачивается целиком за всё время.\n"
+            "Заехать можно в любой момент после 22:00."
+        ),
+    ),
+    FaqItem(
+        key="packages",
+        emoji="🌅",
+        question="Какие ещё есть пакеты?",
+        answer=(
+            "• Утро (<b>{morning_slot}</b>)\n"
+            "• День (<b>{day_slot}</b>)\n"
+            "• Ночь (<b>{night_slot}</b>)\n"
+            "• Почасовая оплата: 1 / 3 / 5 часов — в любое время, кроме пакетов."
+        ),
+    ),
+    FaqItem(
+        key="prepay",
+        emoji="💵",
+        question="Нужна ли предоплата?",
+        answer=(
+            "Предоплату берём <b>только на ночные пакеты и только в выходные (ПТ–ВС)</b> "
+            "— по полной стоимости.\n"
+            "В остальные дни можно оплатить на месте, при входе в клуб."
+        ),
+    ),
+    FaqItem(
+        key="payment",
+        emoji="💳",
+        question="Куда переводить деньги?",
+        answer=(
+            "Единый номер клуба: <b>{payment_system} {payment_card}</b> ({payment_holder}).\n"
+            "Других номеров у нас нет.\n"
+            "После перевода пришлите чек и имя, на которое оформлена бронь."
+        ),
+    ),
+    FaqItem(
+        key="pcs",
+        emoji="🖥",
+        question="Сколько компьютеров в залах?",
+        answer="{pcs}",
+    ),
+    FaqItem(
+        key="faceit",
+        emoji="🎮",
+        question="Работает ли FACEIT?",
+        answer="Да, FACEIT работает — на любом зале.",
+    ),
+    FaqItem(
+        key="late",
+        emoji="⏰",
+        question="Можно приехать позже или снять человека?",
+        answer=(
+            "Опоздать можно, если это <b>не ночной пакет в выходные</b>: при опоздании "
+            "более чем на 15 минут бронь могут снять.\n"
+            "Человека с брони снять можно — скажите администратору по приходу, "
+            "вернём оплату за него."
+        ),
+    ),
+    FaqItem(
+        key="scam",
+        emoji="🚫",
+        question="Как не попасться на мошенников?",
+        answer=(
+            "Мошенники представляются именами администрации и пишут в личные "
+            "сообщения. Мы обсуждаем предоплату <b>только в общей группе</b>, "
+            "а номер для перевода один: <b>{payment_card}</b> ({payment_holder}, "
+            "{payment_system}).\n"
+            "Сомневаетесь — позвоните в клуб: {admin_phone}.\n"
+            "Если вас всё же обманули: сразу звоните в банк получателя, блокируйте "
+            "карту, требуйте возврат и пишите заявление в полицию."
+        ),
+    ),
+)
+
+FAQ_BY_KEY: dict[str, FaqItem] = {item.key: item for item in FAQ_ITEMS}
+
+
+def build_pcs_block() -> str:
+    """Список залов с количеством ПК — подставляется в ответ FAQ «{pcs}»."""
+    return "\n".join(
+        f"• {tariff.title} — {tariff.pcs} ПК"
+        if tariff.pcs
+        else "• Double — парная комната (два ПК рядом)"
+        for tariff in TARIFFS
+    )
+
+
 # --- варианты времени -------------------------------------------------------
 
 TIME_NOW_KEY: str = "now"
@@ -211,9 +322,7 @@ def tariff_price_hint(tariff_key: str | None, time_key: str | None, day: date) -
     if time_key == TIME_NIGHT_KEY:
         note = "выходные (ПТ–ВС)" if is_weekend(day) else "будни"
         return f"ночной пакет ({NIGHT_SLOT}) — {tariff.night_price(day)} ₽, {note}"
-    return (
-        f"{tariff.hour1} ₽/час • 3 часа {tariff.hour3} ₽ • 5 часов {tariff.hour5} ₽"
-    )
+    return f"{tariff.hour1} ₽/час • 3 часа {tariff.hour3} ₽ • 5 часов {tariff.hour5} ₽"
 
 
 def package_key_from_slot(time_slot: str) -> str | None:
@@ -297,18 +406,49 @@ def build_contacts_text(club: ClubInfo) -> str:
     return render(_CONTACTS_TEMPLATE, club, night_slot=NIGHT_SLOT)
 
 
-def build_faq_text(club: ClubInfo) -> str:
-    """Частые вопросы — ответы из реальной практики клуба."""
+def build_rules_body(club: ClubInfo) -> str:
+    """Правила клуба без заголовка — для экрана «📜 Правила»."""
     return render(
-        _FAQ_TEMPLATE,
+        _RULES_BODY,
         club,
         night_slot=NIGHT_SLOT,
         morning_slot=MORNING_SLOT,
         day_slot=DAY_SLOT,
-        pcs="\n".join(
-            f"• {t.title} — {t.pcs} ПК" if t.pcs else "• Double — парная комната (два ПК рядом)"
-            for t in TARIFFS
-        ),
+    )
+
+
+def build_contacts_body(club: ClubInfo) -> str:
+    """Контакты без заголовка — для экрана «📞 Контакты»."""
+    return render(_CONTACTS_BODY, club, night_slot=NIGHT_SLOT)
+
+
+def build_faq_text(club: ClubInfo) -> str:
+    """Частые вопросы одним текстом — собирается из :data:`FAQ_ITEMS`.
+
+    Экран «вопрос → ответ» и эта «бумажная» версия используют один список
+    вопросов, поэтому ответы не расходятся.
+    """
+    body = "\n\n".join(
+        f"<b>{item.emoji} {item.question}</b>\n{faq_answer(item, club)}"
+        for item in FAQ_ITEMS
+    )
+    return (
+        f"❓ <b>ЧАСТЫЕ ВОПРОСЫ — {club.place}</b>\n\n"
+        f"{body}\n\n"
+        f"📍 {club.address}, работаем {club.hours}.\n"
+        f"📞 {club.admin_phone} ({club.admin_name})"
+    )
+
+
+def faq_answer(item: FaqItem, club: ClubInfo) -> str:
+    """Готовый ответ вопроса с подставленными данными клуба."""
+    return render(
+        item.answer,
+        club,
+        night_slot=NIGHT_SLOT,
+        morning_slot=MORNING_SLOT,
+        day_slot=DAY_SLOT,
+        pcs=build_pcs_block(),
     )
 
 
@@ -475,33 +615,23 @@ MENU_HINT: str = (
 HELP_TEXT: str = (
     "ℹ️ <b>Как пользоваться ботом</b>\n"
     "\n"
-    "1️⃣ «💰 Прайс-лист» — цены на Standart, VIP, S VIP и Double: 1/3/5 часов, "
-    "утро, день и ночь.\n"
-    "2️⃣ «📜 Правила» — условия клуба, брони и оплаты.\n"
-    "3️⃣ «🎮 Забронировать» — 4 шага:\n"
-    "     • выберите тариф;\n"
-    "     • выберите время (сейчас, утро, день, ночь или своё);\n"
-    "     • напишите имя, на которое оформить бронь;\n"
-    "     • выберите способ оплаты: прислать чек или оплатить на месте.\n"
-    "4️⃣ Администратор ответит обычно в течение 1–2 минут: бронь подтвердится "
-    "или будет отклонена.\n"
+    "Бот работает в одном сообщении-экране: нажимайте кнопки под ним — разделы "
+    "открываются здесь же, без простыни сообщений. «◀ Назад» возвращает на "
+    "предыдущий экран, «🏠 В меню» — домой.\n"
     "\n"
-    "💵 Предоплата нужна только на ночные пакеты в выходные (ПТ–ВС). В остальные "
-    "дни можно оплатить на месте.\n"
-    "❓ «Частые вопросы» — ответы про ночь, пакеты и мошенников.\n"
+    "• «🖥 Залы и цены» — Standart, VIP, S VIP, Double: 1/3/5 ч, утро, день, ночь.\n"
+    "• «🎮 Забронировать» — 4 шага: зал → время → имя → способ оплаты.\n"
+    "• «📋 Мои брони» — статусы ваших заявок.\n"
+    "• «❓ FAQ» — вопросы по одному, ответ открывается по нажатию.\n"
+    "• «📜 Правила», «📞 Контакты» — условия клуба, телефон и реквизиты.\n"
     "\n"
-    "Вопросы? Администратор: {admin_phone} ({admin_name}).\n"
+    "💵 Предоплата — только ночь в ПТ–ВС. В остальные дни платите на месте.\n"
+    "📞 Клуб: {admin_phone} ({admin_name}).\n"
     "\n"
-    "<b>Команды бота</b>\n"
-    "/start — главное меню\n"
-    "/cancel — отменить текущее бронирование\n"
-    "/privacy — персональные данные и отзыв согласия\n"
-    "/help — эта справка"
+    "Команды: /start — экран с нуля, /cancel — отмена брони, /privacy — 152-ФЗ."
 )
 
-_PRICE_LIST_TEMPLATE: str = (
-    "💰 <b>ПРАЙС-ЛИСТ — {club_place}</b>\n"
-    "\n"
+_PRICE_LIST_BODY: str = (
     "{tariffs}\n"
     "\n"
     "────────────────────\n"
@@ -517,9 +647,10 @@ _PRICE_LIST_TEMPLATE: str = (
     "{admin_phone}."
 )
 
-_RULES_TEMPLATE: str = (
-    "📜 <b>ПРАВИЛА КЛУБА {club_name}</b>\n"
-    "\n"
+#: Прайс-лист с «бумажным» заголовком (для команд и печатных выгрузок).
+_PRICE_LIST_TEMPLATE: str = "💰 <b>ПРАЙС-ЛИСТ — {club_place}</b>\n\n" + _PRICE_LIST_BODY
+
+_RULES_BODY: str = (
     "<b>1. Общие положения</b>\n"
     "1.1. Клуб работает {club_hours} по адресу: {club_address}.\n"
     "1.2. Играя в клубе, вы автоматически соглашаетесь с этими правилами.\n"
@@ -580,11 +711,12 @@ _RULES_TEMPLATE: str = (
     "🎮 Желаем хорошей игры и высокого FPS!"
 )
 
-_CONTACTS_TEMPLATE: str = (
-    "📞 <b>Связь с администратором</b>\n"
-    "\n"
+#: Правила клуба с «бумажным» заголовком.
+_RULES_TEMPLATE: str = "📜 <b>ПРАВИЛА КЛУБА {club_name}</b>\n\n" + _RULES_BODY
+
+_CONTACTS_BODY: str = (
     "👤 Ответит: <b>{admin_name}</b>\n"
-    "📱 Телефон клуба: <b>{admin_phone}</b>\n"
+    "📱 Телефон клуба: <b><a href=\"tel:{admin_phone_raw}\">{admin_phone}</a></b>\n"
     "📍 Адрес: {club_address}\n"
     "🕒 Работаем: {club_hours}\n"
     "💳 Предоплата (ночные пакеты в ПТ–ВС): {payment_system} {payment_card} "
@@ -600,55 +732,11 @@ _CONTACTS_TEMPLATE: str = (
     "Чтобы оформить бронь прямо сейчас, нажмите «🎮 Забронировать» в меню."
 )
 
-_FAQ_TEMPLATE: str = (
-    "❓ <b>ЧАСТЫЕ ВОПРОСЫ — {club_place}</b>\n"
-    "\n"
-    "<b>🌙 Во сколько начинается ночь?</b>\n"
-    "Ночной пакет — с 22:00 до 08:00, оплачивается целиком за всё время.\n"
-    "\n"
-    "<b>🌅 Какие ещё есть пакеты?</b>\n"
-    "Утро ({morning_slot}), День ({day_slot}) и почасовая оплата: 1 / 3 / 5 "
-    "часов.\n"
-    "\n"
-    "<b>💵 Нужна ли предоплата?</b>\n"
-    "Предоплату берём только на ночные пакеты и только в выходные (ПТ–ВС) — по "
-    "полной стоимости. В остальные дни можно оплатить на месте, при входе в "
-    "клуб.\n"
-    "\n"
-    "<b>💳 Куда переводить деньги?</b>\n"
-    "Единый номер клуба: {payment_system} {payment_card} ({payment_holder}). "
-    "Других номеров у нас нет. После перевода пришлите чек и имя, на которое "
-    "оформлена бронь.\n"
-    "\n"
-    "<b>🖥 Сколько компьютеров в залах?</b>\n"
-    "{pcs}\n"
-    "\n"
-    "<b>🎮 Работает ли FACEIT?</b>\n"
-    "Да, FACEIT работает.\n"
-    "\n"
-    "<b>👥 Можно снять человека с брони?</b>\n"
-    "Да. По приходу скажите администратору — вернём оплату за этого человека.\n"
-    "\n"
-    "<b>⏰ Можно приехать позже?</b>\n"
-    "Да, если это не ночной пакет в выходные. При опоздании более чем на 15 "
-    "минут бронь может быть снята.\n"
-    "\n"
-    "<b>🚫 Осторожно, мошенники!</b>\n"
-    "Мошенники могут представляться именами администрации и писать в личные "
-    "сообщения. Мы обсуждаем предоплату <b>только в общей группе</b>, а номер "
-    "для перевода один: {payment_card} ({payment_holder}, {payment_system}).\n"
-    "Сомневаетесь — позвоните в клуб: {admin_phone}.\n"
-    "Если вас всё же обманули: сразу звоните в банк получателя, блокируйте "
-    "карту, требуйте возврат и пишите заявление в полицию.\n"
-    "\n"
-    "📍 {club_address}, работаем {club_hours}.\n"
-    "📞 {admin_phone} ({admin_name})"
-)
+#: Контакты с «бумажным» заголовком.
+_CONTACTS_TEMPLATE: str = "📞 <b>Связь с администратором</b>\n\n" + _CONTACTS_BODY
 
 UNKNOWN_MESSAGE: str = (
-    "🤔 Я не понял вашу команду.\n"
-    "\n"
-    "Пожалуйста, выберите действие кнопками меню ниже 👇"
+    "🤔 Текстовая команда не распознана — выбирайте раздел кнопками ниже."
 )
 
 ADMIN_NO_ACCESS: str = (
@@ -656,8 +744,12 @@ ADMIN_NO_ACCESS: str = (
     "\n"
     "Если вы работаете в клубе и вам нужен доступ — попросите владельца бота "
     "добавить ваш Telegram ID в админ-панели. Как узнать свой ID: напишите "
-    "@userinfobot. Вопросы по играм и бронированию — в обычном меню: "
-    "«🎮 Забронировать», «💰 Прайс-лист», «❓ Частые вопросы»."
+    "@userinfobot. Вопросы по играм и бронированию — в главном меню (/start)."
+)
+
+#: Короткое сообщение для всплывающего окна (лимит Telegram — 200 символов).
+ADMIN_NO_ACCESS_ALERT: str = (
+    "⛔️ Этот экран доступен только администраторам клуба."
 )
 
 # ---------------------------------------------------------------------------
@@ -765,8 +857,7 @@ PREPAY_REQUIRED_ALERT: str = (
 )
 
 PRICE_HINT_LOOK_AT_PRICE_LIST: str = (
-    "по прайсу выбранного тарифа и длительности — сверьтесь с разделом "
-    "«💰 Прайс-лист»"
+    "по прайсу выбранного тарифа и длительности — сверьтесь с разделом «💰 Прайс-лист»"
 )
 
 RECEIPT_WAITING: str = (
@@ -891,8 +982,7 @@ STEP_HINT_PAYMENT: str = (
     "«💵 Оплачу на месте»."
 )
 STEP_HINT_RECEIPT: str = (
-    "Сейчас нужно прислать фото чека об оплате — реквизиты были в предыдущем "
-    "сообщении."
+    "Сейчас нужно прислать фото чека об оплате — реквизиты были в предыдущем сообщении."
 )
 
 # ---------------------------------------------------------------------------
@@ -916,8 +1006,7 @@ NEW_BOOKING_CAPTION: str = (
 
 #: Варианты строки об оплате в уведомлении администратору.
 NEW_BOOKING_RECEIPT_NOTE: str = (
-    "📸 Чек об оплате — на фото выше. Проверьте поступление денег и выберите "
-    "действие."
+    "📸 Чек об оплате — на фото выше. Проверьте поступление денег и выберите действие."
 )
 NEW_BOOKING_SPOT_NOTE: str = (
     "💵 Оплата на месте (предоплата не требуется). Подтвердите бронь, если "
@@ -1007,10 +1096,8 @@ ADMIN_PANEL_GREETING: str = (
 )
 
 ADMIN_START_INFO: str = (
-    "🛠 Вы — администратор бота {club_name}.\n"
-    "\n"
-    "Отправьте /admin, чтобы открыть панель: статистика, активные брони и "
-    "список администраторов."
+    "🛠 Вы — администратор бота {club_name} (роль: <b>{role}</b>).\n"
+    "Панель управления — кнопка «🛠 Админ-панель» в меню (запасной вход: /admin)."
 )
 
 ADMIN_NOT_STARTED_WARNING: str = (
@@ -1036,8 +1123,7 @@ STATS_TEMPLATE: str = (
 )
 
 PENDING_LIST_HEADER: str = (
-    "📋 <b>Активные брони</b> (ожидают решения): {count}\n"
-    "Страница {page} из {pages}"
+    "📋 <b>Активные брони</b> (ожидают решения): {count}\nСтраница {page} из {pages}"
 )
 
 PENDING_ITEM: str = (
@@ -1093,22 +1179,20 @@ ADMIN_ROLE_PROMPT_OWNER: str = (
 )
 
 ADMIN_ADD_PROMPT: str = (
-    "➕ <b>Новый администратор</b>\n"
-    "\n"
-    "Отправьте его числовой Telegram ID одним сообщением — например "
-    "<code>123456789</code>.\n"
+    "Отправьте числовой Telegram ID нового администратора одним сообщением — "
+    "например <code>123456789</code>.\n"
     "Узнать ID: пусть будущий администратор напишет @userinfobot или "
     "перешлёт вам любое своё сообщение (в нём виден «ID отправителя»).\n"
     "\n"
     "⚠️ Человек должен сначала нажать /start в боте, иначе уведомления ему не "
-    "дойдут. Отмена — кнопка «❌ Отменить»."
+    "дойдут. Отмена — кнопка «✕ Отменить»."
 )
 
 ADMIN_ADD_INVALID_ID: str = (
     "😕 Это не похоже на Telegram ID. Нужны только цифры, например "
     "<code>123456789</code>.\n"
     "\n"
-    "Отправьте ID ещё раз или отмените добавление кнопкой «❌ Отменить»."
+    "Отправьте ID ещё раз или отмените добавление кнопкой «✕ Отменить»."
 )
 
 ADMIN_ALREADY_EXISTS: str = (
@@ -1124,15 +1208,21 @@ ADMIN_ADDED: str = (
     "попросите его отправить /start, иначе уведомления не дойдут."
 )
 
-ADMIN_ENABLED: str = "🟢 Администратор {user_link} снова активен — доступ и уведомления включены."
+ADMIN_ENABLED: str = (
+    "🟢 Администратор {user_link} снова активен — доступ и уведомления включены."
+)
 ADMIN_DISABLED: str = (
     "🔴 Администратор {user_link} отключён: панель и новые брони ему больше не "
     "доступны. Запись сохранена в базе — включить можно кнопкой «🔄 Включить»."
 )
 ADMIN_REMOVED: str = "🗑 Запись администратора {user_link} удалена из базы клуба."
 
-ADMIN_ROLE_PROMOTED: str = "👑 {user_link} теперь владелец бота: может управлять списком администраторов."
-ADMIN_ROLE_DEMOTED: str = "👤 {user_link} теперь администратор: заявки обрабатывает, список не меняет."
+ADMIN_ROLE_PROMOTED: str = (
+    "👑 {user_link} теперь владелец бота: может управлять списком администраторов."
+)
+ADMIN_ROLE_DEMOTED: str = (
+    "👤 {user_link} теперь администратор: заявки обрабатывает, список не меняет."
+)
 
 ADMIN_SELF_PROTECTED: str = (
     "⚠️ Себя отключить или удалить нельзя — попросите другого владельца бота.\n"
@@ -1185,9 +1275,7 @@ ADMIN_GOODBYE: str = (
 
 #: Уведомление о смене роли.
 ADMIN_ROLE_CHANGED: str = (
-    "👥 Ваша роль в боте {club_name} изменена: <b>{role}</b>.\n"
-    "\n"
-    "{note}"
+    "👥 Ваша роль в боте {club_name} изменена: <b>{role}</b>.\n\n{note}"
 )
 ADMIN_ROLE_NOTE_OWNER: str = (
     "Теперь вы владелец бота: обрабатываете заявки и управляете списком "
@@ -1202,6 +1290,130 @@ ADMIN_ROLE_NOTE_OPERATOR: str = (
 DECISION_WORD_APPROVED: str = "подтвердил"
 DECISION_WORD_REJECTED: str = "отклонил"
 
+# ---------------------------------------------------------------------------
+# Экраны интерфейса (HUD): содержимое под моноширинной шапкой
+# ---------------------------------------------------------------------------
+# Заголовок экрана рисует bot/ui/screens.py (рамка + «▸ РАЗДЕЛ»), здесь только
+# тело экрана. Плейсхолдеры клуба ({club_*}, {admin_*}, {payment_*}) подставляет
+# render(), остальные — bot/ui/render.py.
+
+SCREEN_MENU_BODY: str = (
+    "Клуб <b>{club_place}</b>\n"
+    "📍 {club_address}\n"
+    "🕒 Работаем {club_hours}\n"
+    "\n"
+    "Выберите раздел — он откроется здесь же, в этом сообщении."
+)
+
+SCREEN_PRICES_BODY: str = (
+    "Цены в рублях. Пакеты: 🌅 утро {morning_slot}, ☀️ день {day_slot}, "
+    "🌙 ночь {night_slot}."
+)
+
+SCREEN_PRICES_NOTE: str = (
+    "🌙 Ночь ПТ–ВС: {night_weekend}\n"
+    "💳 Предоплата — только ночь в ПТ–ВС: <b>{payment_system} {payment_card}</b> "
+    "({payment_holder})\n"
+    "🎮 FACEIT работает."
+)
+
+SCREEN_BOOKINGS_EMPTY: str = (
+    "Заявок пока нет.\n\n«🎮 Забронировать» — 4 шага, около минуты."
+)
+
+SCREEN_BOOKINGS_ITEM: str = (
+    "<b>№{number}</b> · {tariff} · {time_slot}\n🕒 {created} — {status}"
+)
+
+SCREEN_BOOK_TARIFF_BODY: str = (
+    "Выберите зал. Цена указана за час:\n\n{tariffs_overview}"
+)
+
+SCREEN_BOOK_TIME_BODY: str = (
+    "Зал: <b>{tariff}</b>\n"
+    "🕒 Сейчас в клубе {now_time}, {now_date}\n"
+    "\n"
+    "Когда вас ждать? Пакеты оплачиваются целиком, "
+    "«⚡️ Сейчас» — почасовая игра."
+)
+
+SCREEN_BOOK_TIME_TEXT_BODY: str = (
+    "Зал: <b>{tariff}</b>\n"
+    "\n"
+    "Напишите время текстом: «сегодня в 18:30 на 3 часа» "
+    "или «завтра с 15:00 до 20:00».\n"
+    "\n"
+    "⏰ До 60 символов."
+)
+
+SCREEN_BOOK_NAME_BODY: str = (
+    "Зал: <b>{tariff}</b>\n"
+    "Время: <b>{time_slot}</b>\n"
+    "\n"
+    "Напишите имя — по нему администратор найдёт вас в клубе.\n"
+    "От 2 до 40 символов, только буквы."
+)
+
+SCREEN_BOOK_PAY_BODY: str = (
+    "Зал: <b>{tariff}</b>\n"
+    "Время: <b>{time_slot}</b>\n"
+    "Имя: <b>{client_name}</b>\n"
+    "💰 К оплате: {amount}\n"
+    "\n"
+    "{payment_rules}"
+)
+
+SCREEN_BOOK_RECEIPT_BODY: str = (
+    "Переведите {amount} на единый номер клуба:\n"
+    "<b>{payment_system} {payment_card}</b> ({payment_holder})\n"
+    "\n"
+    "Затем пришлите <b>ФОТО чека</b> — снимок экрана из банковского "
+    "приложения или фото квитанции."
+)
+
+SCREEN_BOOK_DONE_BODY: str = (
+    "Заявка <b>№{booking_id}</b> ушла администраторам — обычно ответ "
+    "приходит за 1–2 минуты.\n"
+    "\n"
+    "Зал: <b>{tariff}</b>\n"
+    "Время: <b>{time_slot}</b>\n"
+    "Имя: <b>{client_name}</b>\n"
+    "Оплата: <b>{payment_note}</b>\n"
+    "\n"
+    "Ждите подтверждения сюда — отправлять заявку повторно не нужно."
+)
+
+#: Способ оплаты на экране «Заявка отправлена» (для клиента, не для админа).
+SCREEN_DONE_PAID_CHECK: str = "чек отправлен на проверку"
+SCREEN_DONE_PAID_SPOT: str = "на месте, при входе в клуб"
+
+SCREEN_ADMIN_BODY: str = (
+    "Сводка клуба на <b>{now}</b>. Кнопка «🔄 Обновить» — чтобы освежить цифры."
+)
+
+SCREEN_ADMIN_PENDING_ITEM: str = (
+    "<b>№{booking_id}</b> · {tariff} · {time_slot}\n"
+    "👤 {client_name} · {client_link}\n"
+    "🕒 {created} · 💰 {amount}"
+)
+
+SCREEN_ADMIN_PENDING_EMPTY: str = "Все заявки разобраны — новых нет."
+
+SCREEN_ADMIN_ADMINS_BODY: str = (
+    "Записей: {admins_total}, активных: {admins_active}.\n"
+    "Нажмите на администратора, чтобы открыть карточку."
+)
+
+SCREEN_ADMIN_ADMIN_BODY: str = (
+    "{link}\n"
+    "🆔 <code>{user_id}</code>\n"
+    "🎖 Роль: {role}\n"
+    "📶 Статус: {state}\n"
+    "🕒 Добавлен: {added_at} · {added_by}"
+)
+
+SCREEN_PRIVACY_BODY: str = PRIVACY_TEXT
+
 
 def tariff_titles() -> Iterable[str]:
     """Названия всех тарифов — для справок и логов."""
@@ -1209,10 +1421,17 @@ def tariff_titles() -> Iterable[str]:
 
 
 __all__ = [
+    "ADMINS_EMPTY",
+    "ADMINS_ITEM",
+    "ADMINS_ITEM_ADDED",
+    "ADMINS_LIST_HEADER",
+    "ADMINS_OWNER_ENV_NOTE",
+    "ADMINS_STATE_ACTIVE",
+    "ADMINS_STATE_DISABLED",
+    "ADMIN_ADDED",
     "ADMIN_ADD_CANCELED",
     "ADMIN_ADD_INVALID_ID",
     "ADMIN_ADD_PROMPT",
-    "ADMIN_ADDED",
     "ADMIN_ALREADY_EXISTS",
     "ADMIN_ALREADY_PROCESSED",
     "ADMIN_ALREADY_PROCESSED_NOTE",
@@ -1228,6 +1447,7 @@ __all__ = [
     "ADMIN_NOT_ACTIVE",
     "ADMIN_NOT_STARTED_WARNING",
     "ADMIN_NO_ACCESS",
+    "ADMIN_NO_ACCESS_ALERT",
     "ADMIN_OWNER_PROTECTED",
     "ADMIN_PANEL_GREETING",
     "ADMIN_REMOVED",
@@ -1241,13 +1461,6 @@ __all__ = [
     "ADMIN_SELF_PROTECTED",
     "ADMIN_START_INFO",
     "ADMIN_WELCOME",
-    "ADMINS_EMPTY",
-    "ADMINS_ITEM",
-    "ADMINS_ITEM_ADDED",
-    "ADMINS_LIST_HEADER",
-    "ADMINS_OWNER_ENV_NOTE",
-    "ADMINS_STATE_ACTIVE",
-    "ADMINS_STATE_DISABLED",
     "BOOKING_CANCELED",
     "BOOKING_IN_PROGRESS_HINT",
     "BOOKING_NOT_STARTED",
@@ -1262,15 +1475,17 @@ __all__ = [
     "CLIENT_REJECTED",
     "CONSENT_ACCEPTED",
     "CONSENT_REQUIRED",
+    "CONSENT_REVOKED",
     "CONSENT_REVOKE_CANCELED",
     "CONSENT_REVOKE_CONFIRM",
-    "CONSENT_REVOKED",
     "CONSENT_TEXT",
     "DAY_SLOT",
     "DECISION_WORD_APPROVED",
     "DECISION_WORD_REJECTED",
     "ENTER_CUSTOM_TIME",
     "ENTER_NAME",
+    "FAQ_BY_KEY",
+    "FAQ_ITEMS",
     "GREETING",
     "HELP_TEXT",
     "INVALID_CUSTOM_TIME",
@@ -1297,6 +1512,26 @@ __all__ = [
     "RECEIPT_NOT_PHOTO",
     "RECEIPT_RECEIVED",
     "RECEIPT_WAITING",
+    "SCREEN_ADMIN_ADMINS_BODY",
+    "SCREEN_ADMIN_ADMIN_BODY",
+    "SCREEN_ADMIN_BODY",
+    "SCREEN_ADMIN_PENDING_EMPTY",
+    "SCREEN_ADMIN_PENDING_ITEM",
+    "SCREEN_BOOKINGS_EMPTY",
+    "SCREEN_BOOKINGS_ITEM",
+    "SCREEN_BOOK_DONE_BODY",
+    "SCREEN_BOOK_NAME_BODY",
+    "SCREEN_BOOK_PAY_BODY",
+    "SCREEN_BOOK_RECEIPT_BODY",
+    "SCREEN_BOOK_TARIFF_BODY",
+    "SCREEN_BOOK_TIME_BODY",
+    "SCREEN_BOOK_TIME_TEXT_BODY",
+    "SCREEN_DONE_PAID_CHECK",
+    "SCREEN_DONE_PAID_SPOT",
+    "SCREEN_MENU_BODY",
+    "SCREEN_PRICES_BODY",
+    "SCREEN_PRICES_NOTE",
+    "SCREEN_PRIVACY_BODY",
     "STATS_TEMPLATE",
     "STEP_HINT_NAME",
     "STEP_HINT_PAYMENT",
@@ -1316,17 +1551,22 @@ __all__ = [
     "TIME_TITLE_BY_KEY",
     "UNKNOWN_MESSAGE",
     "WEEKEND_DAYS",
+    "FaqItem",
     "amount_due",
     "amount_for_booking",
     "amount_text",
-    "package_key_from_slot",
+    "build_contacts_body",
     "build_contacts_text",
     "build_faq_text",
+    "build_pcs_block",
     "build_price_list",
+    "build_rules_body",
     "build_rules_text",
     "build_tariffs_overview",
+    "faq_answer",
     "get_tariff",
     "is_weekend",
+    "package_key_from_slot",
     "prepayment_required",
     "render",
     "tariff_button_label",

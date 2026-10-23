@@ -55,6 +55,8 @@ CB_PAY_PREFIX: str = "bk:pay:"
 CB_PAY_CHECK: str = "bk:pay:check"
 CB_PAY_SPOT: str = "bk:pay:spot"
 CB_BOOKING_CANCEL: str = "bk:cancel"
+#: Шаг назад внутри мастера бронирования.
+CB_BOOKING_BACK: str = "bk:back"
 
 #: Способы оплаты на шаге 4.
 PAY_WAY_CHECK: str = "check"
@@ -79,6 +81,7 @@ BOOKING_CALLBACK_PREFIXES: tuple[str, ...] = (
     CB_TARIFF_PREFIX,
     CB_TIME_PREFIX,
     CB_PAY_PREFIX,
+    CB_BOOKING_BACK,
     CB_BOOKING_CANCEL,
 )
 
@@ -474,6 +477,7 @@ __all__ = [
     "CB_ADMIN_REJECT_PREFIX",
     "CB_ADMIN_STATS",
     "CB_ADMIN_TOGGLE_PREFIX",
+    "CB_BOOKING_BACK",
     "CB_BOOKING_CANCEL",
     "CB_CONSENT_GIVE",
     "CB_TIME_PREFIX",
