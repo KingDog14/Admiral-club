@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
@@ -28,6 +29,9 @@ from bot.keyboards.inline import booking_decision_keyboard
 from bot.utils.formatting import escape_html, format_datetime, now_full_text, truncate
 
 logger = logging.getLogger(__name__)
+
+#: Что писать в «К оплате», если сумму заранее не узнать (почасовая игра).
+NEW_BOOKING_AMOUNT_BY_PRICE: str = "по прайсу (сверьтесь с прайс-листом)"
 
 #: Ограничения Telegram на длину подписи к медиа и текста сообщения.
 CAPTION_LIMIT: int = 1024
@@ -137,13 +141,27 @@ async def deliver_new_booking(
         return DeliveryReport()
 
     client_link = user.link if user is not None else f"ID: <code>{booking.user_id}</code>"
-    caption = texts.NEW_BOOKING_CAPTION.format(
+    # Чек приходит только если клиент оплатил заранее; в будни и на дневных
+    # пакетах клуб принимает оплату на месте — администратор должен это видеть.
+    payment_note = (
+        texts.NEW_BOOKING_RECEIPT_NOTE if booking.receipt_file_id else texts.NEW_BOOKING_SPOT_NOTE
+    )
+    # Сумму показываем, когда она известна заранее (пакет); при почасовой игре
+    # администратор считает время по факту.
+    amount = texts.amount_for_booking(
+        booking.tariff, booking.time_slot, datetime.now(cfg.timezone).date()
+    )
+    caption = texts.render(
+        texts.NEW_BOOKING_CAPTION,
+        cfg.club,
         booking_id=booking.id,
         tariff=escape_html(booking.tariff),
         time_slot=escape_html(booking.time_slot),
         client_name=escape_html(booking.client_name),
         user_link=client_link,
         created_at=format_datetime(booking.created_at, cfg.timezone),
+        amount=f"<b>{amount} ₽</b>" if amount is not None else NEW_BOOKING_AMOUNT_BY_PRICE,
+        payment_note=payment_note,
         admins_count=len(recipients),
     )
 
@@ -273,21 +291,25 @@ async def sync_peer_admins(
     return failed
 
 
-async def deliver_decision(bot: Bot, booking: Booking, approved: bool) -> bool:
+async def deliver_decision(bot: Bot, cfg: AppConfig, booking: Booking, approved: bool) -> bool:
     """Сообщить клиенту решение по его брони.
 
     Возвращает ``True``, если сообщение доставлено (``False`` — клиент
     заблокировал бота или возникла ошибка Telegram API).
     """
     if approved:
-        text = texts.CLIENT_APPROVED.format(
+        text = texts.render(
+            texts.CLIENT_APPROVED,
+            cfg.club,
             tariff=escape_html(booking.tariff),
             time_slot=escape_html(booking.time_slot),
             booking_id=booking.id,
             client_name=escape_html(booking.client_name),
         )
     else:
-        text = texts.CLIENT_REJECTED.format(
+        text = texts.render(
+            texts.CLIENT_REJECTED,
+            cfg.club,
             booking_id=booking.id,
             tariff=escape_html(booking.tariff),
             time_slot=escape_html(booking.time_slot),
@@ -333,6 +355,7 @@ __all__ = [
     "CALLBACK_ANSWER_LIMIT",
     "CAPTION_LIMIT",
     "MESSAGE_LIMIT",
+    "NEW_BOOKING_AMOUNT_BY_PRICE",
     "DeliveryReport",
     "admin_recipients",
     "decision_note",

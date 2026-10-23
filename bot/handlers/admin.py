@@ -75,6 +75,7 @@ from bot.states import AdminFSM
 from bot.utils.formatting import (
     escape_html,
     format_datetime,
+    now_full_text,
     truncate,
 )
 from bot.utils.telegram import edit_or_send, safe_edit_message_caption
@@ -92,12 +93,13 @@ _ADMIN_ID_RE = re.compile(r"^\d{3,}$")
 # --------------------------------------------------------------------------- #
 # Вспомогательные функции отрисовки
 # --------------------------------------------------------------------------- #
-async def _stats_text(db: Database) -> str:
+async def _stats_text(db: Database, cfg: AppConfig) -> str:
     """Текст панели со статистикой (используется и /admin, и кнопка обновления)."""
     stats = await db.get_stats()
-    return texts.ADMIN_PANEL_GREETING.format(
-        club_name=texts.CLUB_NAME,
-        stats=texts.STATS_TEMPLATE.format(**stats.as_dict()),
+    return texts.render(
+        texts.ADMIN_PANEL_GREETING,
+        cfg.club,
+        stats=texts.STATS_TEMPLATE.format(now=now_full_text(cfg.timezone), **stats.as_dict()),
     )
 
 
@@ -216,21 +218,18 @@ async def _render_admin_item(bot: Bot, db: Database, admin: Admin, index: int) -
     """Одна строка списка администраторов."""
     state = texts.ADMINS_STATE_ACTIVE if admin.is_active else texts.ADMINS_STATE_DISABLED
     label = await _admin_label(bot, db, admin.user_id)
-    if admin.added_by:
-        added_by = await _admin_label(bot, db, admin.added_by)
-        return texts.ADMINS_ITEM_ADDED.format(
-            index=index,
-            user_link=label,
-            role=admin.role_title,
-            state=state,
-            added_by=added_by,
-        )
-    return texts.ADMINS_ITEM.format(
+    item = texts.ADMINS_ITEM.format(
         index=index,
         user_link=label,
+        user_id=admin.user_id,
         role=admin.role_title,
         state=state,
+        added="",
     )
+    if admin.added_by:
+        added_by = await _admin_label(bot, db, admin.added_by)
+        item += texts.ADMINS_ITEM_ADDED.format(added_by=added_by)
+    return item
 
 
 async def _apply_admin_view(
@@ -302,9 +301,9 @@ async def _deny_management(
 # Команда /admin — статистика
 # --------------------------------------------------------------------------- #
 @router.message(Command("admin", "stats"))
-async def cmd_admin(message: Message, db: Database) -> None:
+async def cmd_admin(message: Message, db: Database, cfg: AppConfig) -> None:
     """Показать статистику заявок и кнопки панели."""
-    await message.answer(await _stats_text(db), reply_markup=admin_panel_keyboard())
+    await message.answer(await _stats_text(db, cfg), reply_markup=admin_panel_keyboard())
     logger.info(
         "Админ-панель: %s запросил статистику",
         message.from_user.id if message.from_user else "?",
@@ -312,9 +311,9 @@ async def cmd_admin(message: Message, db: Database) -> None:
 
 
 @router.callback_query(F.data == CB_ADMIN_STATS)
-async def cb_refresh_stats(callback: CallbackQuery, db: Database, bot: Bot) -> None:
+async def cb_refresh_stats(callback: CallbackQuery, db: Database, bot: Bot, cfg: AppConfig) -> None:
     """Кнопка «🔄 Обновить статистику»."""
-    text = await _stats_text(db)
+    text = await _stats_text(db, cfg)
     await edit_or_send(
         bot,
         callback.message.chat.id,
@@ -442,7 +441,7 @@ async def msg_admin_id(
         admin = await db.add_admin(admin_id, role=AdminRole.OPERATOR, added_by=operator_id)
         if admins is not None:
             admins.remember(admin_id)
-        answer = texts.ADMIN_ADDED.format(user_link=label, role=admin.role_title)
+        answer = texts.ADMIN_ADDED.format(user_link=label, user_id=admin.user_id, role=admin.role_title)
         if await db.get_user(admin_id) is None:
             answer += "\n\n" + texts.ADMIN_NOT_STARTED_WARNING.format(user_link=label)
         logger.info("Администратор %s добавлен пользователем %s", admin_id, operator_id)
@@ -660,7 +659,7 @@ async def cb_decision(
         )
         return
 
-    delivered = await deliver_decision(bot, booking, approved)
+    delivered = await deliver_decision(bot, cfg, booking, approved)
     decided_by = await resolve_decided_by(bot, db, admin_id)
 
     decision_text = texts.ADMIN_DECISION_OK if approved else texts.ADMIN_DECISION_NO

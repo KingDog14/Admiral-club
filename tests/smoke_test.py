@@ -28,7 +28,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -55,7 +55,7 @@ from aiogram.types import (
 )
 
 from bot import texts  # noqa: E402
-from bot.config import AppConfig, ConfigError, load_config  # noqa: E402
+from bot.config import AppConfig, ClubInfo, ConfigError, load_config  # noqa: E402
 from bot.db.database import Database, init_database  # noqa: E402
 from bot.db.models import AdminRole, BookingStatus  # noqa: E402
 from bot.filters.access import IsAdmin, IsPrivateChat  # noqa: E402
@@ -77,7 +77,14 @@ from bot.services.notifications import (  # noqa: E402
     deliver_new_booking,
     sync_peer_admins,
 )
-from bot.states import DATA_TARIFF_KEY, DATA_TIME_SLOT, AdminFSM, BookingFSM  # noqa: E402
+from bot.states import (  # noqa: E402
+    DATA_CLIENT_NAME,
+    DATA_TARIFF_KEY,
+    DATA_TIME_KEY,
+    DATA_TIME_SLOT,
+    AdminFSM,
+    BookingFSM,
+)
 
 TEST_TOKEN = "1234567890:AAH_test_token_for_local_checks_only"
 DB_CLIENT_ID = 111_222_333  # клиент из блока проверок базы данных
@@ -530,8 +537,11 @@ def test_booking_logic() -> None:
     moment = datetime(2026, 10, 23, 17, 51, tzinfo=TEST_TZ)
 
     check_equal("«Сейчас» фиксирует время обращения", time_slot_text("now", moment), "Сейчас (с 17:51, 23.10.2026)")
-    check_equal("«На ночь» → ночной пакет", time_slot_text("night", moment), "На ночь (22:00–08:00)")
+    check_equal("«На ночь» → ночной пакет", time_slot_text("night", moment), "Ночь (22:00–08:00)")
+    check_equal("«Утро» → утренний пакет", time_slot_text("morning", moment), "Утро (8:00–13:00)")
+    check_equal("«День» → дневной пакет", time_slot_text("day", moment), "День (13:00–17:00)")
     check("«Другое» требует ввода текстом", time_slot_text("other", moment) is None)
+    check("Неизвестный вариант времени не принимается", time_slot_text("когда-нибудь", moment) is None)
 
     check_equal("Имя приводится к аккуратному виду", clean_client_name("  иван  "), "Иван")
     check_equal("Имя с дефисом проходит", clean_client_name("анна-мария"), "Анна-мария")
@@ -552,7 +562,38 @@ def test_booking_logic() -> None:
     check("Команда вместо времени отклоняется", clean_custom_time("/cancel") is None)
 
     check("Нажатие кнопки меню распознаётся", is_menu_button_text(reply_keyboards.MENU_PRICE) is True)
+    check("Кнопка «Частые вопросы» в меню", is_menu_button_text(reply_keyboards.MENU_FAQ) is True)
     check("Обычный текст кнопкой меню не считается", is_menu_button_text("Иван") is False)
+
+    # --- реальные цены клуба: суббота против вторника ----------------------- #
+    saturday, tuesday = date(2026, 10, 17), date(2026, 10, 20)
+    check("17.10.2026 — суббота (выходной)", texts.is_weekend(saturday) is True)
+    check("20.10.2026 — вторник (будни)", texts.is_weekend(tuesday) is False)
+    check_equal(
+        "Ночь Standart в субботу — 650 ₽ (как в логе клуба)",
+        texts.amount_due("standart", "night", saturday),
+        650,
+    )
+    check_equal("Ночь Standart в будни — 600 ₽", texts.amount_due("standart", "night", tuesday), 600)
+    check_equal("4 ночных места Standart в субботу — 2600 ₽", texts.amount_due("standart", "night", saturday) * 4, 2600)
+    check_equal("Ночь Double в субботу — 1000 ₽", texts.amount_due("double", "night", saturday), 1000)
+    check_equal("Утро VIP — 500 ₽", texts.amount_due("vip", "morning", saturday), 500)
+    check_equal("День S VIP — 700 ₽", texts.amount_due("svip", "day", saturday), 700)
+    check("Почасовая игра считается по прайсу", texts.amount_due("vip", "now", saturday) is None)
+    check("Своё время считается по прайсу", texts.amount_due("vip", "other", saturday) is None)
+
+    check("Ночь в субботу требует предоплаты", texts.prepayment_required("night", saturday) is True)
+    check("Ночь во вторник — без предоплаты", texts.prepayment_required("night", tuesday) is False)
+    check("Утро в субботу — без предоплаты", texts.prepayment_required("morning", saturday) is False)
+    check("День в субботу — без предоплаты", texts.prepayment_required("day", saturday) is False)
+    check("«Сейчас» — без предоплаты", texts.prepayment_required("now", saturday) is False)
+
+    check_equal(
+        "Сумма к оплате для ночи в субботу",
+        texts.amount_text("standart", "night", saturday),
+        "<b>650 ₽</b>",
+    )
+    check("Сумма для почасовой игры — «по прайсу»", "по прайсу" in texts.amount_text("standart", "now", saturday))
 
 
 # --------------------------------------------------------------------------- #
@@ -562,7 +603,7 @@ def test_keyboards() -> None:
     print("\n— Клавиатуры —")
     menu = reply_keyboards.main_menu()
     buttons = [button.text for row in menu.keyboard for button in row]
-    check_equal("Главное меню: 4 кнопки", len(buttons), 4)
+    check_equal("Главное меню: 5 кнопок", len(buttons), 5)
     check_equal(
         "Состав главного меню",
         buttons,
@@ -570,6 +611,7 @@ def test_keyboards() -> None:
             reply_keyboards.MENU_PRICE,
             reply_keyboards.MENU_RULES,
             reply_keyboards.MENU_BOOKING,
+            reply_keyboards.MENU_FAQ,
             reply_keyboards.MENU_CONTACTS,
         ],
     )
@@ -578,6 +620,50 @@ def test_keyboards() -> None:
     consent = inline_keyboards.consent_keyboard()
     check_equal("Экран согласия: одна кнопка", len(consent.inline_keyboard[0]), 1)
     check_equal("Текст кнопки согласия", consent.inline_keyboard[0][0].text, "✅ Я согласен")
+
+    privacy = inline_keyboards.privacy_keyboard()
+    check_equal("В /privacy есть кнопка отзыва согласия", len(privacy.inline_keyboard[0]), 1)
+    check_equal(
+        "Текст кнопки отзыва согласия",
+        privacy.inline_keyboard[0][0].text,
+        "🚫 Отозвать согласие",
+    )
+    check_equal(
+        "Кнопка отзыва ведёт на consent:revoke",
+        privacy.inline_keyboard[0][0].callback_data,
+        inline_keyboards.CB_CONSENT_REVOKE,
+    )
+    revoke = inline_keyboards.revoke_confirm_keyboard()
+    revoke_buttons = [b for row in revoke.inline_keyboard for b in row]
+    check_equal("Подтверждение отзыва: две кнопки", len(revoke_buttons), 2)
+    check_equal(
+        "Подтверждение отзыва: правильные callback",
+        [b.callback_data for b in revoke_buttons],
+        [inline_keyboards.CB_CONSENT_REVOKE_YES, inline_keyboards.CB_CONSENT_REVOKE_NO],
+    )
+
+    pay_prepaid = inline_keyboards.payment_choice_keyboard(True)
+    pay_prepaid_buttons = [b for row in pay_prepaid.inline_keyboard for b in row]
+    check_equal("Шаг 4 с предоплатой: чек + отмена", len(pay_prepaid_buttons), 2)
+    check(
+        "При обязательной предоплате нет кнопки «на месте»",
+        all("на месте" not in b.text for b in pay_prepaid_buttons),
+    )
+    pay_free = inline_keyboards.payment_choice_keyboard(False)
+    pay_free_buttons = [b for row in pay_free.inline_keyboard for b in row]
+    check_equal("Шаг 4 без предоплаты: чек, на месте, отмена", len(pay_free_buttons), 3)
+    check_equal(
+        "Разбор способа оплаты: чек",
+        inline_keyboards.parse_payment_way(inline_keyboards.CB_PAY_CHECK),
+        inline_keyboards.PAY_WAY_CHECK,
+    )
+    check_equal(
+        "Разбор способа оплаты: на месте",
+        inline_keyboards.parse_payment_way(inline_keyboards.CB_PAY_SPOT),
+        inline_keyboards.PAY_WAY_SPOT,
+    )
+    check("Мусор в способе оплаты отклоняется", inline_keyboards.parse_payment_way("bk:pay:xxx") is None)
+    check("Чужой префикс не считается оплатой", inline_keyboards.parse_payment_way("bk:t:vip") is None)
 
     tariffs = inline_keyboards.tariffs_keyboard()
     tariff_buttons = [b for row in tariffs.inline_keyboard for b in row]
@@ -589,7 +675,18 @@ def test_keyboards() -> None:
     )
 
     times = inline_keyboards.time_slots_keyboard()
-    check_equal("Шаг 2: 3 варианта времени + отмена", len([b for row in times.inline_keyboard for b in row]), 4)
+    check_equal("Шаг 2: 5 вариантов времени + отмена", len([b for row in times.inline_keyboard for b in row]), 6)
+    check(
+        "Варианты времени: сейчас, утро, день, ночь, другое",
+        [texts.TIME_TITLE_BY_KEY[key] for key, _ in texts.TIME_CHOICES]
+        == [
+            "⚡️ Сейчас (почасово)",
+            "🌅 Утро (8:00–13:00)",
+            "☀️ День (13:00–17:00)",
+            "🌙 Ночь (22:00–08:00)",
+            "✏️ Другое время",
+        ],
+    )
 
     decision = inline_keyboards.booking_decision_keyboard(123)
     check_equal("Под чеком две кнопки", len(decision.inline_keyboard[0]), 2)
@@ -603,8 +700,12 @@ def test_keyboards() -> None:
 
     named_keyboards = {
         "согласие": consent,
+        "/privacy": privacy,
+        "подтверждение отзыва": revoke,
         "тарифы": tariffs,
         "время": times,
+        "способ оплаты (предоплата)": pay_prepaid,
+        "способ оплаты (на месте)": pay_free,
         "решение по брони": decision,
         "админ-панель": inline_keyboards.admin_panel_keyboard(),
         "список заявок": pending,
@@ -647,17 +748,47 @@ def test_keyboards() -> None:
 # --------------------------------------------------------------------------- #
 def test_texts() -> None:
     print("\n— Тексты —")
-    price = texts.build_price_list()
+    club = ClubInfo()
+    price = texts.build_price_list(club)
     for title in ("Standart", "VIP", "S VIP", "Double"):
-        check(f"Прайс содержит тариф {title}", title in price)
-    check("Прайс содержит ночной тариф", "Ночь (22:00–08:00)" in price)
-    check("Прайс содержит реквизиты", texts.PAYMENT_CARD in price)
+        # Клуб подписывает залы заглавными: «💻 STANDART (12 PC)».
+        check(f"Прайс содержит тариф {title}", title.upper() in price)
+    check("Прайс содержит ночной пакет", texts.NIGHT_SLOT in price)
+    check("Прайс содержит утренний пакет", texts.MORNING_SLOT in price)
+    check("Прайс содержит дневной пакет", texts.DAY_SLOT in price)
+    check("Прайс содержит реквизиты", club.payment_card in price)
     check("В прайсе не осталось плейсхолдеров", "{" not in price)
+    check("Прайс предупреждает про предоплату только в ПТ–ВС", "ПТ–ВС" in price)
+    check("Прайс упоминает FACEIT", "FACEIT" in price)
 
-    rules = texts.build_rules_text()
+    # Цены из прайса клуба (лог от 22.10.2026) — построчно.
+    for line in (
+        "1 час: 150 ₽ • 3 часа: 420 ₽ • 5 часов: 650 ₽",
+        "1 час: 190 ₽ • 3 часа: 530 ₽ • 5 часов: 780 ₽",
+        "1 час: 210 ₽ • 3 часа: 580 ₽ • 5 часов: 880 ₽",
+        "1 час: 240 ₽ • 3 часа: 650 ₽ • 5 часов: 950 ₽",
+    ):
+        check(f"В прайсе есть строка «{line}»", line in price)
+
+    rules = texts.build_rules_text(club)
     check("Правила собраны без плейсхолдеров", "{" not in rules and "Бронирование и оплата" in rules)
-    contacts = texts.build_contacts_text()
-    check("Контакты содержат телефон админа", texts.ADMIN_PHONE_PRETTY in contacts and "{" not in contacts)
+    check("Правила объясняют предоплату только на ночь в ПТ–ВС", "только в выходные (ПТ–ВС)" in rules)
+    check("Правила предупреждают о мошенниках", "мошенник" in rules.lower())
+    check("Правила называют единый номер клуба", club.payment_card in rules)
+    check("Правила просят обсуждать предоплату в группе", "общей группе" in rules)
+
+    contacts = texts.build_contacts_text(club)
+    check("Контакты содержат телефон клуба", club.admin_phone in contacts and "{" not in contacts)
+    check("Контакты содержат адрес клуба", club.address in contacts)
+    check("Контакты предупреждают о мошенниках", "мошенник" in contacts.lower())
+
+    faq = texts.build_faq_text(club)
+    check("FAQ собран без плейсхолдеров", "{" not in faq)
+    check("FAQ отвечает, во сколько начинается ночь", "22:00" in faq and "08:00" in faq)
+    check("FAQ объясняет предоплату", "ПТ–ВС" in faq)
+    check("FAQ предупреждает о мошенниках", "мошенник" in faq.lower())
+    check("FAQ отвечает про FACEIT", "FACEIT" in faq)
+    check("FAQ называет единый номер", club.payment_card in faq)
 
     consent = texts.CONSENT_TEXT
     check("Согласие ссылается на 152-ФЗ", "152-ФЗ" in consent)
@@ -665,18 +796,32 @@ def test_texts() -> None:
     check("Согласие описывает цель обработки", "Цель обработки" in consent)
     check("Согласие описывает отзыв", "отозв" in consent.lower())
 
-    payment = texts.PAYMENT_DETAILS.format(
+    payment = texts.render(
+        texts.PAYMENT_DETAILS,
+        club,
         tariff="VIP",
         time_slot="Сейчас",
         client_name="Иван",
-        price_hint="180 ₽/час",
-        payment_system=texts.PAYMENT_SYSTEM,
-        payment_card=texts.PAYMENT_CARD,
-        payment_holder=texts.PAYMENT_HOLDER,
+        amount=texts.amount_text("vip", "now", date.today()),
+        payment_rules=texts.render(texts.PAYMENT_RULES_ON_SPOT, club),
     )
-    check("Шаг оплаты содержит реквизиты Сбер + номер", "Сбер" in payment and texts.PAYMENT_CARD in payment)
-    check("Шаг оплаты содержит имя получателя", texts.PAYMENT_HOLDER in payment)
-    check("Шаг оплаты просит ФОТО чека", "ФОТО чека" in payment)
+    check("Шаг оплаты содержит реквизиты Сбербанк + номер", "Сбербанк" in payment and club.payment_card in payment)
+    check("Шаг оплаты содержит имя получателя", club.payment_holder in payment)
+    check("Шаг оплаты предлагает выбрать способ оплаты", "способ оплаты" in payment.lower())
+    check("Шаг оплаты без предоплаты разрешает платить на месте", "на месте" in payment)
+
+    prepaid = texts.render(
+        texts.PAYMENT_DETAILS,
+        club,
+        tariff="Standart",
+        time_slot="Ночь (22:00–08:00)",
+        client_name="Иван",
+        amount=texts.amount_text("standart", "night", date(2026, 10, 17)),
+        payment_rules=texts.render(texts.PAYMENT_RULES_PREPAID, club),
+    )
+    check("Ночь в ПТ–ВС: шаг оплаты требует полную предоплату", "полной предоплате" in prepaid)
+    check("Ночь в ПТ–ВС: указана сумма 650 ₽", "650 ₽" in prepaid)
+    check("Ночь в ПТ–ВС: просит фото чека", "фото чека" in prepaid.lower())
 
     samples = {
         texts.GREETING: {"user_name": "Иван"},
@@ -689,12 +834,34 @@ def test_texts() -> None:
             "tariff": "VIP",
             "time_slot": "Сейчас",
             "client_name": "Иван",
+            "amount": "<b>190 ₽</b>",
         },
-        texts.RECEIPT_NOT_PHOTO: {
-            "payment_system": texts.PAYMENT_SYSTEM,
-            "payment_card": texts.PAYMENT_CARD,
-            "payment_holder": texts.PAYMENT_HOLDER,
+        texts.RECEIPT_NOT_PHOTO: {},
+        texts.RECEIPT_WAITING: {},
+        texts.BOOKING_SPOT_RECEIVED: {
+            "booking_id": 1,
+            "tariff": "VIP",
+            "time_slot": "Сейчас",
+            "client_name": "Иван",
         },
+        texts.RECEIPT_ADMIN_UNAVAILABLE: {"booking_id": 1},
+        texts.MENU_HINT: {},
+        texts.HELP_TEXT: {},
+        texts.PRIVACY_TEXT: {},
+        texts.CONSENT_TEXT: {},
+        texts.CONSENT_REVOKE_CONFIRM: {},
+        texts.CONSENT_REVOKE_CANCELED: {},
+        texts.CONSENT_REVOKED: {"revoked_at": "23.10.2026 17:51"},
+        texts.ADMIN_WELCOME: {},
+        texts.ADMIN_GOODBYE: {},
+        texts.ADMIN_ROLE_CHANGED: {"role": "владелец", "note": texts.ADMIN_ROLE_NOTE_OWNER},
+        texts.ADMIN_ROLE_PROMPT: {
+            "user_link": "@admin",
+            "user_id": 1,
+            "role": "администратор",
+            "state": texts.ADMINS_STATE_ACTIVE,
+        },
+        texts.ADMIN_ROLE_PROMPT_OWNER: {"user_link": "@owner", "user_id": 2},
         texts.NEW_BOOKING_CAPTION: {
             "booking_id": 1,
             "tariff": "VIP",
@@ -702,6 +869,8 @@ def test_texts() -> None:
             "client_name": "Иван",
             "user_link": "@client",
             "created_at": "23.10.2026 17:51",
+            "amount": "<b>850 ₽</b>",
+            "payment_note": texts.NEW_BOOKING_RECEIPT_NOTE,
             "admins_count": 2,
         },
         texts.CLIENT_APPROVED: {
@@ -712,6 +881,7 @@ def test_texts() -> None:
         },
         texts.CLIENT_REJECTED: {"booking_id": 1, "tariff": "VIP", "time_slot": "Сейчас"},
         texts.STATS_TEMPLATE: {
+            "now": "23.10.2026 17:51",
             "total": 10,
             "pending": 3,
             "approved": 5,
@@ -751,9 +921,15 @@ def test_texts() -> None:
             "decided_at": "23.10.2026 17:51",
         },
         texts.ADMIN_PANEL_GREETING: {
-            "club_name": texts.CLUB_NAME,
             "stats": texts.STATS_TEMPLATE.format(
-                total=10, pending=3, approved=5, rejected=2, users=8, consented=8, admins=2,
+                now="23.10.2026 17:51",
+                total=10,
+                pending=3,
+                approved=5,
+                rejected=2,
+                users=8,
+                consented=8,
+                admins=2,
                 admins_active=2,
             ),
         },
@@ -762,19 +938,17 @@ def test_texts() -> None:
         texts.ADMINS_ITEM: {
             "index": 1,
             "user_link": "@admin",
+            "user_id": 111,
             "role": "владелец",
             "state": texts.ADMINS_STATE_ACTIVE,
+            "added": "",
         },
-        texts.ADMINS_ITEM_ADDED: {
-            "index": 2,
-            "user_link": "@second",
-            "role": "администратор",
-            "state": texts.ADMINS_STATE_DISABLED,
-            "added_by": "@admin",
-        },
-        texts.ADMIN_ADDED: {"user_link": "@new", "role": "администратор"},
+        texts.ADMINS_ITEM_ADDED: {"added_by": "@admin"},
+        texts.ADMIN_ADD_PROMPT: {},
+        texts.ADMIN_ADDED: {"user_link": "@new", "user_id": 42, "role": "администратор"},
         texts.ADMIN_ALREADY_EXISTS: {
             "user_link": "@new",
+            "user_id": 42,
             "role": "администратор",
             "state": texts.ADMINS_STATE_ACTIVE,
         },
@@ -785,33 +959,98 @@ def test_texts() -> None:
         texts.ADMIN_ROLE_PROMOTED: {"user_link": "@new"},
         texts.ADMIN_ROLE_DEMOTED: {"user_link": "@new"},
         texts.ADMIN_MANAGE_FORBIDDEN: {"role": "администратор"},
-        texts.ADMIN_ADD_PROMPT: {},
         texts.ADMIN_ADD_INVALID_ID: {},
         texts.ADMIN_ADD_CANCELED: {},
-        texts.ADMIN_OWNER_PROTECTED: {},
+        texts.ADMIN_OWNER_PROTECTED: {"user_link": "@owner"},
         texts.ADMIN_SELF_PROTECTED: {},
         texts.ADMIN_LAST_OWNER_PROTECTED: {},
+        texts.ADMIN_DECISION_OK: {"booking_id": 3},
+        texts.ADMIN_DECISION_NO: {"booking_id": 3},
+        texts.ADMIN_NOT_STARTED_WARNING: {"user_link": "@new"},
+        texts.PREPAY_REQUIRED_ALERT: {},
         texts.ADMIN_NOT_ACTIVE: {},
         texts.ADMIN_NO_ACCESS: {},
         texts.ADMINS_EMPTY: {},
     }
     for template, payload in samples.items():
-        rendered = template.format(**payload)
+        rendered = texts.render(template, club, **payload)
         check(f"Шаблон «{template.splitlines()[0][:38]}…» рендерится", "{" not in rendered)
 
-    check("Подсказка цены для ночи точная", "850 ₽" in texts.tariff_price_hint("vip", "night"))
-    check("Подсказка цены для «Сейчас» ссылается на прайс", "прайсу" in texts.tariff_price_hint("vip", "now"))
+    check("Данные клуба подставляются в шаблоны", club.admin_phone in texts.render(texts.CONSENT_TEXT, club))
+    check(
+        "Смена телефона в .env меняет текст",
+        "+7 900 000-00-00" in texts.render(texts.CONSENT_TEXT, ClubInfo(admin_phone="+7 900 000-00-00")),
+    )
+    check(
+        "Смена имени администратора меняет текст",
+        "Пётр" in texts.render(texts.CONTACTS_LIGHT, ClubInfo(admin_name="Пётр"))
+        if hasattr(texts, "CONTACTS_LIGHT")
+        else "Пётр" in texts.render(texts._CONTACTS_TEMPLATE, ClubInfo(admin_name="Пётр")),
+    )
+
+    saturday_check, tuesday_check = date(2026, 10, 17), date(2026, 10, 20)
+    check_equal(
+        "Пакет угадывается по строке времени: ночь",
+        texts.package_key_from_slot("Ночь (22:00–08:00)"),
+        texts.TIME_NIGHT_KEY,
+    )
+    check_equal(
+        "Пакет угадывается по строке времени: утро",
+        texts.package_key_from_slot("Утро (8:00–13:00)"),
+        texts.TIME_MORNING_KEY,
+    )
+    check_equal(
+        "Пакет угадывается по строке времени: день",
+        texts.package_key_from_slot("День (13:00–17:00)"),
+        texts.TIME_DAY_KEY,
+    )
+    check("«Сейчас» — не пакет", texts.package_key_from_slot("Сейчас (с 17:51, 23.10.2026)") is None)
+    check_equal(
+        "Сумма заявки считается по названию тарифа и строке времени",
+        texts.amount_for_booking("Standart", "Ночь (22:00–08:00)", saturday_check),
+        650,
+    )
+    check_equal(
+        "Сумма ночи в будни считается по будничной цене",
+        texts.amount_for_booking("Standart", "Ночь (22:00–08:00)", tuesday_check),
+        600,
+    )
+    check(
+        "Для почасовой игры сумма заранее неизвестна",
+        texts.amount_for_booking("Standart", "Сейчас (с 17:51, 23.10.2026)", saturday_check) is None,
+    )
+    check(
+        "Неизвестный тариф — без суммы",
+        texts.amount_for_booking("Люкс", "Ночь (22:00–08:00)", saturday_check) is None,
+    )
+
+    check(
+        "Подсказка цены для ночи точная",
+        "850 ₽" in texts.tariff_price_hint("vip", "night", date(2026, 10, 20)),
+    )
+    check(
+        "Подсказка цены для ночи в выходные — 900 ₽",
+        "900 ₽" in texts.tariff_price_hint("vip", "night", date(2026, 10, 17)),
+    )
+    check(
+        "Подсказка цены для «Сейчас» — почасовая",
+        "190 ₽/час" in texts.tariff_price_hint("vip", "now", date(2026, 10, 17)),
+    )
     check("Подпись кнопки тарифа содержит цену", "₽/час" in texts.tariff_button_label(texts.TARIFFS[0]))
     check(
         "Подпись к чеку укладывается в лимит Telegram (1024)",
         len(
-            texts.NEW_BOOKING_CAPTION.format(
+            texts.render(
+                texts.NEW_BOOKING_CAPTION,
+                club,
                 booking_id=1,
                 tariff="S VIP",
-                time_slot="На ночь",
+                time_slot="Ночь (22:00–08:00)",
                 client_name="И",
                 user_link="@user",
                 created_at="23.10.2026 17:51",
+                amount="<b>950 ₽</b>",
+                payment_note=texts.NEW_BOOKING_RECEIPT_NOTE,
                 admins_count=3,
             )
         )
@@ -851,8 +1090,8 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
     greeting_payload = [p for n, p in bot.since(mark) if n == "SendMessage"][-1]
     check("После согласия показано приветствие", "Здравствуйте" in text_of(greeting_payload))
     check(
-        "Вместе с приветствием выдано reply-меню из 4 кнопок",
-        len([b for row in markup_of(greeting_payload).keyboard for b in row]) == 4,
+        "Вместе с приветствием выдано reply-меню из 5 кнопок",
+        len([b for row in markup_of(greeting_payload).keyboard for b in row]) == 5,
     )
     check("Тост о фиксации согласия отправлен", any("Согласие зафиксировано" in text_of(p) for p in bot.answers()))
 
@@ -922,33 +1161,53 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
     # --- кнопка меню во время сценария не ломает его ------------------------- #
     mark = bot.mark()
     await client_handlers.msg_enter_name(
-        make_message(user_id=client_id, bot=bot, text=reply_keyboards.MENU_PRICE), state
+        make_message(user_id=client_id, bot=bot, text=reply_keyboards.MENU_PRICE), state, cfg
     )
     check("Кнопка меню во время сценария даёт подсказку", any("оформляем бронь" in t for t in bot.new_texts(mark)))
     check_equal("Сценарий не прерывается", await state.get_state(), BookingFSM.entering_name.state)
 
     mark = bot.mark()
-    await client_handlers.msg_enter_name(make_message(user_id=client_id, bot=bot, text="http://spam"), state)
+    await client_handlers.msg_enter_name(
+        make_message(user_id=client_id, bot=bot, text="http://spam"), state, cfg
+    )
     check("Некорректное имя отклоняется", bot.new_texts(mark) == [texts.INVALID_NAME])
 
-    # --- шаг 3: имя → реквизиты --------------------------------------------- #
+    # --- шаг 3: имя → шаг 4 (способ оплаты) --------------------------------- #
     mark = bot.mark()
-    await client_handlers.msg_enter_name(make_message(user_id=client_id, bot=bot, text="тимур"), state)
-    check_equal("Шаг 4: ожидание чека", await state.get_state(), BookingFSM.waiting_receipt.state)
+    await client_handlers.msg_enter_name(make_message(user_id=client_id, bot=bot, text="тимур"), state, cfg)
+    check_equal("Шаг 4: выбор способа оплаты", await state.get_state(), BookingFSM.choosing_payment.state)
     payment_text = bot.new_texts(mark)[0]
     check(
-        "На шаге оплаты показаны реквизиты Сбер + номер",
-        "Сбер" in payment_text and texts.PAYMENT_CARD in payment_text,
+        "На шаге оплаты показаны реквизиты Сбербанк + номер",
+        "Сбербанк" in payment_text and cfg.club.payment_card in payment_text,
     )
-    check("На шаге оплаты указано имя получателя", texts.PAYMENT_HOLDER in payment_text)
-    check("На шаге оплаты просят ФОТО чека", "ФОТО чека" in payment_text)
+    check("На шаге оплаты указано имя получателя", cfg.club.payment_holder in payment_text)
     check("Имя нормализовано до «Тимур»", "Тимур" in payment_text)
     check("Тариф подставлен в шаг оплаты", "S VIP" in payment_text)
+    check("Для будней и своего времени предоплата не требуется", "на месте" in payment_text)
+    pay_markup = markup_of(bot.new_messages(mark)[0])
+    pay_buttons = [b for row in pay_markup.inline_keyboard for b in row]
+    check(
+        "Доступны оба способа: чек и «на месте»",
+        len(pay_buttons) == 3
+        and any("чек" in b.text for b in pay_buttons)
+        and any("на месте" in b.text for b in pay_buttons),
+    )
+
+    # --- шаг 4: клиент выбирает «оплатил — отправить чек» -------------------- #
+    mark = bot.mark()
+    await client_handlers.cb_choose_payment(
+        make_callback(inline_keyboards.CB_PAY_CHECK, user_id=client_id, bot=bot), state, db, bot, cfg
+    )
+    check_equal("Шаг 4б: ожидание фото чека", await state.get_state(), BookingFSM.waiting_receipt.state)
+    waiting_text = " ".join(bot.step_texts(mark))
+    check("После выбора чека бот ждёт ФОТО чека", "ФОТО" in waiting_text or "фото" in waiting_text)
+    check("В ожидании чека повторены реквизиты", cfg.club.payment_card in waiting_text)
 
     # --- текст вместо фото --------------------------------------------------- #
     mark = bot.mark()
     await client_handlers.msg_receipt_expected(
-        make_message(user_id=client_id, bot=bot, text="я оплатил")
+        make_message(user_id=client_id, bot=bot, text="я оплатил"), cfg
     )
     check(
         "Текст вместо фото — просьба прислать именно фото",
@@ -1003,8 +1262,8 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
     list_text = text_of(edits[-1])
     pending_total = await db.count_bookings(BookingStatus.PENDING)
     check("Список активных броней отрисован", "Активные брони" in list_text)
-    check("В списке видны номера заявок", "№" in list_text)
-    check("Счётчик в заголовке совпадает с базой", f"Заявок: <b>{pending_total}</b>" in list_text)
+    check("В списке видны номера заявок", "#" in list_text)
+    check("Счётчик в заголовке совпадает с базой", f"ожидают решения): {pending_total}" in list_text)
     check("На странице не больше 5 заявок", list_text.count("👤") <= 5)
     check(
         "У каждой заявки в списке есть кнопки решения",
@@ -1082,7 +1341,7 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
         BookingStatus.REJECTED,
     )
     rejected_text = text_of([p for n, p in bot.since(mark) if n == "SendMessage"][0])
-    check("При отклонении клиенту дан телефон админа", texts.ADMIN_PHONE_PRETTY in rejected_text)
+    check("При отклонении клиенту дан телефон клуба", cfg.club.admin_phone in rejected_text)
     check("При отклонении сказано, что бронь не подтверждена", "не смогли подтвердить" in rejected_text)
     check(
         "Сообщение админа со списком перерисовано",
@@ -1094,6 +1353,7 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
     await admin_handlers.cmd_admin(
         make_message(user_id=ADMIN_ID, bot=bot, text="/admin", username="admin", first_name="Админ"),
         db,
+        cfg,
     )
     stats_payload = bot.new_messages(mark)[0]
     stats_text = text_of(stats_payload)
@@ -1109,7 +1369,7 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
 
     mark = bot.mark()
     await admin_handlers.cb_refresh_stats(
-        make_callback(inline_keyboards.CB_ADMIN_STATS, user_id=ADMIN_ID, bot=bot), db, bot
+        make_callback(inline_keyboards.CB_ADMIN_STATS, user_id=ADMIN_ID, bot=bot), db, bot, cfg
     )
     check("Кнопка обновления статистики работает", any(n == "EditMessageText" for n, _ in bot.since(mark)))
 
@@ -1182,30 +1442,98 @@ async def test_cancel_and_outdated(db: Database, cfg: AppConfig) -> None:
 
     mark = bot.mark()
     await client_handlers.msg_price_list(
-        make_message(user_id=CANCEL_CLIENT_ID, bot=bot, text=reply_keyboards.MENU_PRICE)
+        make_message(user_id=CANCEL_CLIENT_ID, bot=bot, text=reply_keyboards.MENU_PRICE), cfg
     )
     price_text = bot.new_texts(mark)[0]
-    check("Прайс-лист отправляется клиенту", "ПРАЙС-ЛИСТ" in price_text and "Standart" in price_text)
+    check("Прайс-лист отправляется клиенту", "ПРАЙС-ЛИСТ" in price_text and "STANDART" in price_text)
 
     mark = bot.mark()
-    await client_handlers.msg_rules(make_message(user_id=CANCEL_CLIENT_ID, bot=bot, text=reply_keyboards.MENU_RULES))
+    await client_handlers.msg_rules(
+        make_message(user_id=CANCEL_CLIENT_ID, bot=bot, text=reply_keyboards.MENU_RULES), cfg
+    )
     check("Правила отправляются клиенту", "ПРАВИЛА КЛУБА" in bot.new_texts(mark)[0])
 
     mark = bot.mark()
+    await client_handlers.msg_faq(
+        make_message(user_id=CANCEL_CLIENT_ID, bot=bot, text=reply_keyboards.MENU_FAQ), cfg
+    )
+    faq_text = bot.new_texts(mark)[0]
+    check("Частые вопросы отправляются клиенту", "ЧАСТЫЕ ВОПРОСЫ" in faq_text)
+    check("В FAQ есть про ночь и предоплату", "22:00" in faq_text and "ПТ–ВС" in faq_text)
+
+    mark = bot.mark()
     await client_handlers.msg_contacts(
-        make_message(user_id=CANCEL_CLIENT_ID, bot=bot, text=reply_keyboards.MENU_CONTACTS)
+        make_message(user_id=CANCEL_CLIENT_ID, bot=bot, text=reply_keyboards.MENU_CONTACTS), cfg
     )
     contacts_calls = [p for n, p in bot.since(mark) if n in ("SendMessage", "SendContact")]
     check("Контакты: текст + карточка контакта", len(contacts_calls) == 2)
-    check("В контактах телефон администратора", texts.ADMIN_PHONE_PRETTY in text_of(contacts_calls[0]))
-    check("Карточка контакта содержит номер", getattr(contacts_calls[1], "phone_number", "") == texts.ADMIN_PHONE_RAW)
+    check("В контактах телефон клуба", cfg.club.admin_phone in text_of(contacts_calls[0]))
+    check("В контактах адрес клуба", cfg.club.address in text_of(contacts_calls[0]))
+    check(
+        "Карточка контакта содержит номер",
+        getattr(contacts_calls[1], "phone_number", "") == cfg.club.admin_phone_raw,
+    )
 
     mark = bot.mark()
-    await client_handlers.cmd_privacy(make_message(user_id=CANCEL_CLIENT_ID, bot=bot, text="/privacy"))
-    check("Команда /privacy показывает политику ПДн", "152-ФЗ" in bot.new_texts(mark)[0])
+    await client_handlers.cmd_privacy(make_message(user_id=CANCEL_CLIENT_ID, bot=bot, text="/privacy"), cfg)
+    privacy_text = bot.new_texts(mark)[0]
+    check("Команда /privacy показывает политику ПДн", "152-ФЗ" in privacy_text)
+    check(
+        "В /privacy есть кнопка отзыва согласия",
+        any(
+            b.callback_data == inline_keyboards.CB_CONSENT_REVOKE
+            for row in markup_of(bot.new_messages(mark)[0]).inline_keyboard
+            for b in row
+        ),
+    )
+
+    # --- отзыв согласия: бот перестаёт работать ----------------------------- #
+    mark = bot.mark()
+    await client_handlers.cb_consent_revoke(
+        make_callback(inline_keyboards.CB_CONSENT_REVOKE, user_id=CANCEL_CLIENT_ID, bot=bot), bot
+    )
+    check(
+        "Отзыв согласия требует подтверждения",
+        "Отзыв согласия" in " ".join(bot.step_texts(mark)),
+    )
+    check(
+        "Подтверждение отзыва снабжено двумя кнопками",
+        len(markup_of(bot.step_payloads(mark)[0]).inline_keyboard[0]) == 2,
+    )
 
     mark = bot.mark()
-    await client_handlers.cmd_help(make_message(user_id=CANCEL_CLIENT_ID, bot=bot, text="/help"))
+    await client_handlers.cb_consent_revoke_yes(
+        make_callback(inline_keyboards.CB_CONSENT_REVOKE_YES, user_id=CANCEL_CLIENT_ID, bot=bot),
+        state,
+        db,
+        bot,
+        cfg,
+    )
+    revoked_text = " ".join(bot.step_texts(mark))
+    check("Согласие снято в базе", (await db.has_consent(CANCEL_CLIENT_ID)) is False)
+    check("Клиенту сообщено об отзыве", "отозвано" in revoked_text.lower())
+    check(
+        "После отзыва предложено вернуть согласие",
+        any(
+            b.callback_data == inline_keyboards.CB_CONSENT_GIVE
+            for row in markup_of(bot.step_payloads(mark)[0]).inline_keyboard
+            for b in row
+        ),
+    )
+
+    # Согласие возвращается той же кнопкой.
+    mark = bot.mark()
+    await client_handlers.cb_consent_give(
+        make_callback(inline_keyboards.CB_CONSENT_GIVE, user_id=CANCEL_CLIENT_ID, bot=bot),
+        state,
+        db,
+        bot,
+        cfg,
+    )
+    check("Согласие можно вернуть той же кнопкой", (await db.has_consent(CANCEL_CLIENT_ID)) is True)
+
+    mark = bot.mark()
+    await client_handlers.cmd_help(make_message(user_id=CANCEL_CLIENT_ID, bot=bot, text="/help"), cfg)
     check("Команда /help показывает справку", "Как пользоваться ботом" in bot.new_texts(mark)[0])
 
     await state.storage.close()
@@ -1456,9 +1784,20 @@ async def test_dispatcher_routing(db: Database, cfg: AppConfig, dispatcher: Disp
     check("feed_update: шаг 3 — ввод имени", any("шаг 3 из 4" in t for t in sent))
     check("feed_update: ночной тариф подставлен в шаг", any("22:00–08:00" in t for t in sent))
 
+    today = datetime.now(cfg.timezone).date()
+    # Ночь в ПТ–ВС (или в любой день) — клиент выбирает способ оплаты; в выходные
+    # клуб требует полную предоплату, поэтому кнопки «на месте» быть не должно.
     _, sent = await feed(make_message(user_id=user_id, bot=bot, text="алексей"))
-    check("feed_update: шаг 4 — реквизиты и запрос чека", any("ФОТО чека" in t for t in sent))
+    check("feed_update: шаг 4 — выбор способа оплаты", any("шаг 4 из 4" in t for t in sent))
     check("feed_update: имя нормализовано", any("Алексей" in t for t in sent))
+    check("feed_update: на шаге оплаты названа сумма", any("К оплате" in t for t in sent))
+    if texts.prepayment_required("night", today):
+        check("feed_update: ночь в выходные — только по предоплате", any("предоплате" in t for t in sent))
+    else:
+        check("feed_update: ночь в будни — можно платить на месте", any("на месте" in t for t in sent))
+
+    _, sent = await feed(make_callback(inline_keyboards.CB_PAY_CHECK, user_id=user_id, bot=bot))
+    check("feed_update: после выбора чека бот ждёт фото", any("фото" in t.lower() for t in sent))
 
     _, sent = await feed(make_message(user_id=user_id, bot=bot, text="а где реквизиты?"))
     check("feed_update: текст вместо чека — просьба прислать фото", any("именно" in t for t in sent))
@@ -1494,7 +1833,7 @@ async def test_dispatcher_routing(db: Database, cfg: AppConfig, dispatcher: Disp
     check("feed_update: /admin от клиента не показывает статистику", not any("Всего заявок" in t for t in sent))
     check(
         "feed_update: /admin от клиента объясняет отсутствие прав",
-        any("доступна администраторам" in t for t in sent),
+        any("только для администраторов" in t for t in sent),
     )
     _, sent = await feed(make_message(user_id=ADMIN_ID, bot=bot, text="/admin", username="admin", first_name="Админ"))
     check("feed_update: /admin администратору показывает статистику", any("Всего заявок" in t for t in sent))
@@ -1505,7 +1844,7 @@ async def test_dispatcher_routing(db: Database, cfg: AppConfig, dispatcher: Disp
     registry.remember(ADMIN_ID_2)
 
     _, sent = await feed(make_message(user_id=user_id, bot=bot, text="/admins"))
-    check("feed_update: /admins от клиента не показывает список", not any("Администраторы клуба" in t for t in sent))
+    check("feed_update: /admins от клиента не показывает список", not any("Администраторы бота" in t for t in sent))
 
     mark = bot.mark()
     _, sent = await feed(
@@ -1513,7 +1852,7 @@ async def test_dispatcher_routing(db: Database, cfg: AppConfig, dispatcher: Disp
     )
     check(
         "feed_update: добавленный админ видит список администраторов",
-        any("Администраторы клуба" in t for t in sent),
+        any("Администраторы бота" in t for t in sent),
     )
     check(
         "feed_update: оператору объяснено, что управление — у владельца",
@@ -1548,7 +1887,7 @@ async def test_dispatcher_routing(db: Database, cfg: AppConfig, dispatcher: Disp
         make_message(user_id=ADMIN_ID, bot=bot, text=str(ADMIN_ID_3), username="admin", first_name="Админ")
     )
     check("feed_update: новый администратор добавлен", await db.get_admin(ADMIN_ID_3) is not None)
-    check("feed_update: после добавления показан обновлённый список", any("Администраторы клуба" in t for t in sent))
+    check("feed_update: после добавления показан обновлённый список", any("Администраторы бота" in t for t in sent))
 
     _, sent = await feed(
         make_message(user_id=ADMIN_ID_3, bot=bot, text="/admin", username="new_admin", first_name="Новый")
@@ -1806,9 +2145,10 @@ async def test_multi_admin(db: Database) -> None:
         cfg,
     )
     listed = panel_bot.new_messages(mark)[0]
-    check("Список администраторов отрисован", "Администраторы клуба" in text_of(listed))
+    check("Список администраторов отрисован", "Администраторы бота" in text_of(listed))
     check("В списке показаны роли", "владелец" in text_of(listed))
-    check("В списке показан статус активности", "🟢 работает" in text_of(listed))
+    check("В списке показан статус активности", "🟢 активен" in text_of(listed))
+    check("В списке показан Telegram ID", str(ADMIN_ID) in text_of(listed))
     check(
         "Владельцу доступны кнопки управления",
         any(b.text == "➕ Добавить" for row in markup_of(listed).inline_keyboard for b in row),
@@ -1852,7 +2192,7 @@ async def test_multi_admin(db: Database) -> None:
     )
     check(
         "Вместо ID — понятная подсказка",
-        any("не похоже на числовой Telegram ID" in t for t in panel_bot.new_texts(mark)),
+        any("не похоже на Telegram ID" in t for t in panel_bot.new_texts(mark)),
     )
     check_equal("Режим ввода не сброшен после ошибки", await state.get_state(), AdminFSM.waiting_admin_id)
     check("Посторонний не добавился в базу", await db.get_admin(ADMIN_ID_3) is None)
@@ -1873,7 +2213,7 @@ async def test_multi_admin(db: Database) -> None:
     )
     check(
         "После добавления показан обновлённый список",
-        any("Администраторы клуба" in t for t in panel_bot.new_texts(mark)),
+        any("Администраторы бота" in t for t in panel_bot.new_texts(mark)),
     )
 
     # --- новый администратор получает доступ --------------------------------- #
@@ -1885,6 +2225,7 @@ async def test_multi_admin(db: Database) -> None:
     await admin_handlers.cmd_admin(
         make_message(user_id=ADMIN_ID_3, bot=panel_bot, text="/admin", username="new_admin", first_name="Новый"),
         db,
+        cfg,
     )
     check("Новому администратору доступна статистика", any("Всего заявок" in t for t in panel_bot.new_texts(mark)))
 
@@ -1911,7 +2252,7 @@ async def test_multi_admin(db: Database) -> None:
         cfg,
     )
     operator_view = panel_bot.new_messages(mark)[0]
-    check("Оператор видит список администраторов", "Администраторы клуба" in text_of(operator_view))
+    check("Оператор видит список администраторов", "Администраторы бота" in text_of(operator_view))
     check("Оператору объяснили отсутствие прав", "только владелец" in text_of(operator_view))
     check(
         "У оператора нет кнопок управления",
@@ -1935,7 +2276,7 @@ async def test_multi_admin(db: Database) -> None:
     check("Отключённый потерял доступ", not await admins.is_admin(ADMIN_ID_3))
     check(
         "В списке показан статус «отключён»",
-        any("⚪️ отключён" in t for t in panel_bot.step_texts(mark)),
+        any("🔴 отключён" in t for t in panel_bot.step_texts(mark)),
     )
     check("Об отключении сообщили", any("отключён" in text_of(p) for p in panel_bot.answers()[-1:]))
 
@@ -1998,7 +2339,7 @@ async def test_multi_admin(db: Database) -> None:
     last_owner = [payload for name, payload in panel_bot.since(mark) if name == "AnswerCallbackQuery"]
     check(
         "Последнего активного владельца нельзя понизить",
-        bool(last_owner) and "последнего" in text_of(last_owner[0]),
+        bool(last_owner) and "последн" in text_of(last_owner[0]),
     )
     check_equal("Роль последнего владельца не изменилась", (await db.get_admin(ADMIN_ID_3)).role, AdminRole.OWNER)
     await db.set_admin_active(ADMIN_ID, True)
@@ -2036,7 +2377,7 @@ async def test_multi_admin(db: Database) -> None:
     )
     check("Администратор удалён из базы", (await db.get_admin(ADMIN_ID_3)) is None)
     check("Удалённый потерял доступ", not await admins.is_admin(ADMIN_ID_3))
-    check("Об удалении сообщили", any("удалён" in text_of(p) for p in panel_bot.answers()[-1:]))
+    check("Об удалении сообщили", any("удален" in text_of(p) for p in panel_bot.answers()[-1:]))
 
     # --- статистика и приветствие -------------------------------------------- #
     stats = await db.get_stats()
@@ -2045,6 +2386,7 @@ async def test_multi_admin(db: Database) -> None:
     await admin_handlers.cmd_admin(
         make_message(user_id=ADMIN_ID, bot=panel_bot, text="/admin", username="admin", first_name="Админ"),
         db,
+        cfg,
     )
     panel_payload = panel_bot.new_messages(mark)[0]
     check("В статистике панели видно администраторов", "Администраторов" in text_of(panel_payload))
@@ -2067,10 +2409,10 @@ async def test_multi_admin(db: Database) -> None:
     greeting = panel_bot.new_texts(mark)
     check(
         "Администратору /start показывает служебную подсказку",
-        any("Вы администратор этого бота" in t for t in greeting),
+        any("Вы — администратор бота" in t for t in greeting),
     )
     check("В подсказке названа роль", any("администратор" in t for t in greeting))
-    check("В подсказке упомянута команда /admins", any("/admins" in t for t in greeting))
+    check("В подсказке упомянута команда /admin", any("/admin" in t for t in greeting))
 
     mark = panel_bot.mark()
     client_state = make_fsm_context(MULTI_CLIENT_ID)
@@ -2089,7 +2431,7 @@ async def test_multi_admin(db: Database) -> None:
     )
     check(
         "Клиенту служебная подсказка администратора не показывается",
-        not any("Вы администратор этого бота" in t for t in panel_bot.new_texts(mark)),
+        not any("Вы — администратор бота" in t for t in panel_bot.new_texts(mark)),
     )
 
     # --- команды панели без прав --------------------------------------------- #
@@ -2106,7 +2448,7 @@ async def test_multi_admin(db: Database) -> None:
     )
     check(
         "Клиенту на /admin объясняют, что команда для администраторов",
-        any("доступна администраторам" in t for t in panel_bot.new_texts(mark)),
+        any("только для администраторов" in t for t in panel_bot.new_texts(mark)),
     )
 
     await db.set_admin_active(ADMIN_ID_2, False)
@@ -2119,7 +2461,7 @@ async def test_multi_admin(db: Database) -> None:
     )
     check(
         "Отключённому администратору сообщают об отключении",
-        any("отключена владельцем" in t for t in panel_bot.new_texts(mark)),
+        any("отключён" in t and "панель" in t for t in panel_bot.new_texts(mark)),
     )
     await db.set_admin_active(ADMIN_ID_2, True)
     admins.remember(ADMIN_ID_2)
@@ -2127,6 +2469,138 @@ async def test_multi_admin(db: Database) -> None:
     for context in (state, operator_state, cancel_state, admin_state, client_state):
         await context.storage.close()
 
+
+# --------------------------------------------------------------------------- #
+# 13. Оплата: чеком или на месте (реальные правила клуба)
+# --------------------------------------------------------------------------- #
+async def test_payment_choice(db: Database, cfg: AppConfig) -> None:
+    """Ночь в ПТ–ВС — только по предоплате, в остальных случаях можно на месте."""
+    print("\n— Способ оплаты: чек или на месте —\n")
+    bot = BotSpy()
+
+    # --- ночь в выходной: кнопки «на месте» нет, предоплата обязательна ----- #
+    night_keyboard = inline_keyboards.payment_choice_keyboard(True)
+    night_buttons = [b.text for row in night_keyboard.inline_keyboard for b in row]
+    check(
+        "Для ночи в ПТ–ВС доступен только чек",
+        sum("чек" in t for t in night_buttons) == 1 and not any("на месте" in t for t in night_buttons),
+        str(night_buttons),
+    )
+
+    # --- оплата на месте: заявка создаётся без чека ------------------------- #
+    client_id = 424_242_424
+    await db.upsert_user(client_id, "spot_client", "Гость")
+    await db.set_consent(client_id, granted=True)
+    state = make_fsm_context(client_id)
+
+    await state.set_state(BookingFSM.choosing_payment)
+    await state.update_data(
+        {
+            DATA_TARIFF_KEY: "standart",
+            DATA_TIME_KEY: texts.TIME_NOW_KEY,
+            DATA_TIME_SLOT: "Сейчас (с 19:00, 23.10.2026)",
+            DATA_CLIENT_NAME: "Гость",
+        }
+    )
+
+    mark = bot.mark()
+    await client_handlers.cb_choose_payment(
+        make_callback(inline_keyboards.CB_PAY_SPOT, user_id=client_id, bot=bot),
+        state,
+        db,
+        bot,
+        cfg,
+    )
+    check_equal("После «на месте» FSM очищен", await state.get_state(), None)
+
+    spot_texts = bot.step_texts(mark)
+    check("Клиенту подтверждена заявка без чека", any("Заявка принята" in t for t in spot_texts))
+    check("В подтверждении сказано про оплату на месте", any("на месте" in t for t in spot_texts))
+    check(
+        "Клиенту вернули главное меню",
+        any("Частые вопросы" in t for t in spot_texts) or any("Меню бота" in t for t in spot_texts),
+    )
+
+    spot_bookings = [b for b in await db.list_bookings(BookingStatus.PENDING, limit=50) if b.client_name == "Гость"]
+    check_equal("Заявка «на месте» сохранена", len(spot_bookings), 1)
+    spot_booking = spot_bookings[0]
+    check("В заявке «на месте» нет чека", spot_booking.receipt_file_id is None)
+
+    admin_messages = [
+        p for n, p in bot.since(mark) if n in ("SendPhoto", "SendMessage") and getattr(p, "chat_id", None) == ADMIN_ID
+    ]
+    check("Администратор уведомлён о заявке «на месте»", bool(admin_messages))
+    admin_caption = text_of(admin_messages[0])
+    check("В уведомлении сказано про оплату на месте", "на месте" in admin_caption)
+    check("В уведомлении НЕ обещан чек", "Чек об оплате — на фото" not in admin_caption)
+    check("В уведомлении есть строка «К оплате»", "К оплате" in admin_caption)
+    check(
+        "Под заявкой «на месте» есть кнопки решения",
+        markup_of(admin_messages[0]) is not None
+        and any(
+            inline_keyboards.parse_admin_decision(b.callback_data) is not None
+            for row in markup_of(admin_messages[0]).inline_keyboard
+            for b in row
+        ),
+    )
+
+    # --- «на месте» для ночи в выходные: отказ с понятным alert ------------- #
+    # Имитируем пятницу/субботу, подменив определение выходного дня.
+    original_is_weekend = texts.is_weekend
+    texts.is_weekend = lambda _day: True  # type: ignore[assignment]
+    try:
+        weekend_state = make_fsm_context(client_id)
+        await weekend_state.set_state(BookingFSM.choosing_payment)
+        await weekend_state.update_data(
+            {
+                DATA_TARIFF_KEY: "standart",
+                DATA_TIME_KEY: texts.TIME_NIGHT_KEY,
+                DATA_TIME_SLOT: "Ночь (22:00–08:00)",
+                DATA_CLIENT_NAME: "Гость",
+            }
+        )
+        mark = bot.mark()
+        await client_handlers.cb_choose_payment(
+            make_callback(inline_keyboards.CB_PAY_SPOT, user_id=client_id, bot=bot),
+            weekend_state,
+            db,
+            bot,
+            cfg,
+        )
+        alerts = [p for n, p in bot.since(mark) if n == "AnswerCallbackQuery"]
+        check("Ночь в ПТ–ВС нельзя оплатить на месте", bool(alerts) and alerts[0].show_alert is True)
+        check(
+            "В alert объяснена причина",
+            "предоплате" in text_of(alerts[0]),
+            text_of(alerts[0]) if alerts else "нет alert",
+        )
+        check_equal("Режим оплаты не сброшен", await weekend_state.get_state(), BookingFSM.choosing_payment.state)
+        await weekend_state.storage.close()
+    finally:
+        texts.is_weekend = original_is_weekend  # type: ignore[assignment]
+
+    # --- выбор чека: бот уходит в ожидание фото ----------------------------- #
+    check_state = make_fsm_context(client_id)
+    await check_state.set_state(BookingFSM.choosing_payment)
+    await check_state.update_data(
+        {
+            DATA_TARIFF_KEY: "standart",
+            DATA_TIME_KEY: texts.TIME_NIGHT_KEY,
+            DATA_TIME_SLOT: "Ночь (22:00–08:00)",
+            DATA_CLIENT_NAME: "Гость",
+        }
+    )
+    await client_handlers.cb_choose_payment(
+        make_callback(inline_keyboards.CB_PAY_CHECK, user_id=client_id, bot=bot),
+        check_state,
+        db,
+        bot,
+        cfg,
+    )
+    check_equal("Выбор чека → ожидание фото", await check_state.get_state(), BookingFSM.waiting_receipt.state)
+
+    await state.storage.close()
+    await check_state.storage.close()
 
 # --------------------------------------------------------------------------- #
 # 12. Обновление базы, созданной предыдущей версией бота
@@ -2246,6 +2720,7 @@ async def run_all() -> int:
         await dispatcher.storage.close()
 
         await test_multi_admin(db)
+        await test_payment_choice(db, cfg)
         await test_migration()
     finally:
         await db.close()

@@ -8,7 +8,12 @@
   и не может быть удалён из панели. Переменная ``ADMIN_ID`` (один ID) тоже
   поддерживается — для обратной совместимости.
 
-Дополнительно можно переопределить ``DB_PATH``, ``TZ`` и ``LOG_LEVEL``.
+Дополнительно можно переопределить ``DB_PATH``, ``TZ``, ``LOG_LEVEL``, а также
+сведения о клубе (:class:`ClubInfo`): название, город, адрес, часы работы, имя и
+телефон администратора, реквизиты для предоплаты. Значения по умолчанию — это
+реальные данные клуба ADMIRAL в Чите, так что бот работает «из коробки», а
+сменить администратора или реквизиты можно одной строкой в ``.env`` без правки
+кода.
 
 ``.env`` задаёт лишь стартовый набор администраторов: остальных можно добавлять
 и отключать прямо в админ-панели, они хранятся в таблице ``admins`` базы данных.
@@ -28,8 +33,22 @@ from dotenv import load_dotenv
 BASE_DIR: Path = Path(__file__).resolve().parent.parent
 ENV_FILE: Path = BASE_DIR / ".env"
 DEFAULT_DB_PATH: Path = BASE_DIR / "data" / "admiral.db"
-DEFAULT_TZ: str = "Asia/Sakhalin"
+DEFAULT_TZ: str = "Asia/Chita"  # клуб в Чите (Забайкальский край), UTC+9
 DEFAULT_LOG_LEVEL: str = "INFO"
+
+# --- Сведения о клубе по умолчанию (реальные данные, меняются через .env) ---- #
+DEFAULT_CLUB_NAME: str = "ADMIRAL"
+DEFAULT_CLUB_CITY: str = "Чита"
+DEFAULT_CLUB_ADDRESS: str = "ул. Подгорбунского, 37 (2 помещение, 1 этаж, вход с торца)"
+DEFAULT_CLUB_HOURS: str = "круглосуточно, 24/7"
+#: Имя администратора — того, кого назначит владелец клуба.
+DEFAULT_ADMIN_NAME: str = "Администратор клуба"
+#: Телефон клуба (по нему просят звонить при любых сомнениях).
+DEFAULT_ADMIN_PHONE: str = "+7 999 299-35-35"
+#: Реквизиты предоплаты: единый номер клуба, только Сбербанк.
+DEFAULT_PAYMENT_SYSTEM: str = "Сбербанк"
+DEFAULT_PAYMENT_CARD: str = "+79143618141"
+DEFAULT_PAYMENT_HOLDER: str = "Тимур В."
 
 
 class ConfigError(RuntimeError):
@@ -45,6 +64,55 @@ class DbSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class ClubInfo:
+    """Сведения о клубе: контакты, адрес, реквизиты предоплаты.
+
+    Всё читается из ``.env`` (``CLUB_*``, ``ADMIN_NAME``, ``ADMIN_PHONE``,
+    ``PAYMENT_*``) с значениями по умолчанию — реальными данными клуба ADMIRAL.
+    Подставляется в тексты через :meth:`as_dict`, поэтому смена администратора
+    или реквизитов не требует правки кода.
+    """
+
+    name: str = DEFAULT_CLUB_NAME
+    city: str = DEFAULT_CLUB_CITY
+    address: str = DEFAULT_CLUB_ADDRESS
+    hours: str = DEFAULT_CLUB_HOURS
+    admin_name: str = DEFAULT_ADMIN_NAME
+    admin_phone: str = DEFAULT_ADMIN_PHONE
+    payment_system: str = DEFAULT_PAYMENT_SYSTEM
+    payment_card: str = DEFAULT_PAYMENT_CARD
+    payment_holder: str = DEFAULT_PAYMENT_HOLDER
+
+    @property
+    def admin_phone_raw(self) -> str:
+        """Номер телефона в формате ``+79992993535`` — для кнопки-контакта."""
+        digits = re.sub(r"\D", "", self.admin_phone)
+        if len(digits) == 11 and digits.startswith("8"):
+            digits = "7" + digits[1:]
+        return f"+{digits}" if digits else ""
+
+    @property
+    def place(self) -> str:
+        """Название клуба с городом: «ADMIRAL (Чита)»."""
+        return f"{self.name} ({self.city})" if self.city else self.name
+
+    def as_dict(self) -> dict[str, str]:
+        """Поля для подстановки в шаблоны текстов (``str.format(**club)``)."""
+        return {
+            "club_name": self.name,
+            "club_place": self.place,
+            "club_city": self.city,
+            "club_address": self.address,
+            "club_hours": self.hours,
+            "admin_name": self.admin_name,
+            "admin_phone": self.admin_phone,
+            "payment_system": self.payment_system,
+            "payment_card": self.payment_card,
+            "payment_holder": self.payment_holder,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class AppConfig:
     """Неизменяемый снимок настроек приложения."""
 
@@ -53,6 +121,7 @@ class AppConfig:
     db_path: Path
     timezone: ZoneInfo
     log_level: str = DEFAULT_LOG_LEVEL
+    club: ClubInfo = ClubInfo()
 
     @property
     def admin_id(self) -> int:
@@ -159,6 +228,27 @@ def _read_log_level() -> str:
     return raw
 
 
+def _read_optional(env_key: str, default: str) -> str:
+    """Прочитать необязательную строковую настройку клуба."""
+    raw = (os.getenv(env_key) or "").strip()
+    return raw or default
+
+
+def read_club_info() -> ClubInfo:
+    """Собрать сведения о клубе из ``.env`` (или взять значения по умолчанию)."""
+    return ClubInfo(
+        name=_read_optional("CLUB_NAME", DEFAULT_CLUB_NAME),
+        city=_read_optional("CLUB_CITY", DEFAULT_CLUB_CITY),
+        address=_read_optional("CLUB_ADDRESS", DEFAULT_CLUB_ADDRESS),
+        hours=_read_optional("CLUB_HOURS", DEFAULT_CLUB_HOURS),
+        admin_name=_read_optional("ADMIN_NAME", DEFAULT_ADMIN_NAME),
+        admin_phone=_read_optional("ADMIN_PHONE", DEFAULT_ADMIN_PHONE),
+        payment_system=_read_optional("PAYMENT_SYSTEM", DEFAULT_PAYMENT_SYSTEM),
+        payment_card=_read_optional("PAYMENT_CARD", DEFAULT_PAYMENT_CARD),
+        payment_holder=_read_optional("PAYMENT_HOLDER", DEFAULT_PAYMENT_HOLDER),
+    )
+
+
 def load_db_settings(env_file: str | Path | None = None) -> DbSettings:
     """Прочитать из окружения только путь к базе и часовой пояс.
 
@@ -183,4 +273,5 @@ def load_config(env_file: str | Path | None = None) -> AppConfig:
         db_path=db_settings.path,
         timezone=db_settings.timezone,
         log_level=_read_log_level(),
+        club=read_club_info(),
     )

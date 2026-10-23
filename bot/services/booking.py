@@ -27,6 +27,14 @@ _NAME_PATTERN = re.compile(r"[^\W\d_]+(?:[ .'\-][^\W\d_]+)*", re.UNICODE)
 _HAS_DIGIT = re.compile(r"\d")
 
 
+#: Варианты времени-пакета: подпись для базы и интервал из прайса клуба.
+_PACKAGES: dict[str | None, tuple[str, str]] = {
+    texts.TIME_MORNING_KEY: ("Утро", texts.MORNING_SLOT),
+    texts.TIME_DAY_KEY: ("День", texts.DAY_SLOT),
+    texts.TIME_NIGHT_KEY: ("Ночь", texts.NIGHT_SLOT),
+}
+
+
 def tariff_title(tariff_key: str | None) -> str | None:
     """Название тарифа по ключу из ``callback_data`` (``svip`` → ``S VIP``)."""
     if not tariff_key:
@@ -37,14 +45,18 @@ def tariff_title(tariff_key: str | None) -> str | None:
 def time_slot_text(time_key: str | None, moment: datetime) -> str | None:
     """Строка времени для БД по выбранной кнопке.
 
-    * ``now``   → «Сейчас (с 17:51, 23.10.2026)» — фиксируем фактический момент;
-    * ``night`` → «На ночь (22:00–08:00)»;
-    * ``other`` → ``None`` (клиент вводит время текстом на следующем шаге).
+    * ``now``     → «Сейчас (с 17:51, 23.10.2026)» — фиксируем фактический момент;
+    * ``morning`` → «Утро (8:00–13:00)»;
+    * ``day``     → «День (13:00–17:00)»;
+    * ``night``   → «Ночь (22:00–08:00)»;
+    * ``other``   → ``None`` (клиент вводит время текстом на следующем шаге).
     """
     if time_key == texts.TIME_NOW_KEY:
         return f"Сейчас (с {moment:%H:%M}, {moment:%d.%m.%Y})"
-    if time_key == texts.TIME_NIGHT_KEY:
-        return f"На ночь ({texts.NIGHT_SLOT})"
+    package = _PACKAGES.get(time_key)
+    if package is not None:
+        label, slot = package
+        return f"{label} ({slot})"
     return None
 
 

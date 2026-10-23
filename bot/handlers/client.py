@@ -31,18 +31,29 @@ from bot.keyboards.inline import (
     BOOKING_CALLBACK_PREFIXES,
     CB_BOOKING_CANCEL,
     CB_CONSENT_GIVE,
+    CB_CONSENT_REVOKE,
+    CB_CONSENT_REVOKE_NO,
+    CB_CONSENT_REVOKE_YES,
+    CB_PAY_PREFIX,
     CB_TARIFF_PREFIX,
     CB_TIME_PREFIX,
+    PAY_WAY_CHECK,
+    PAY_WAY_SPOT,
     booking_cancel_keyboard,
     consent_keyboard,
+    parse_payment_way,
     parse_tariff_key,
     parse_time_key,
+    payment_choice_keyboard,
+    privacy_keyboard,
+    revoke_confirm_keyboard,
     tariffs_keyboard,
     time_slots_keyboard,
 )
 from bot.keyboards.reply import (
     MENU_BOOKING,
     MENU_CONTACTS,
+    MENU_FAQ,
     MENU_PRICE,
     MENU_RULES,
     main_menu,
@@ -106,7 +117,7 @@ async def _admin_greeting(
 
     admin = await db.get_admin(user_id)
     role = admin.role_title if admin is not None else AdminRole.title(AdminRole.OPERATOR)
-    return texts.ADMIN_START_INFO.format(role=role)
+    return texts.render(texts.ADMIN_START_INFO, cfg.club, role=role)
 
 
 # --------------------------------------------------------------------------- #
@@ -142,13 +153,20 @@ async def cmd_start(
 
     if not user.consent_given:
         _consent_gate.forget(sender.id)
-        await message.answer(texts.CONSENT_TEXT, reply_markup=consent_keyboard())
+        await message.answer(
+            texts.render(texts.CONSENT_TEXT, cfg.club),
+            reply_markup=consent_keyboard(),
+        )
         logger.info("Пользователь %s: запрошено согласие на обработку ПДн", sender.id)
         return
 
     _consent_gate.mark_consented(sender.id)
     await message.answer(
-        texts.GREETING.format(user_name=escape_html(user.display_name)),
+        texts.render(
+            texts.GREETING,
+            cfg.club,
+            user_name=escape_html(user.display_name),
+        ),
         reply_markup=main_menu(),
     )
     admin_greeting = await _admin_greeting(db, cfg, admins, sender.id)
@@ -187,7 +205,7 @@ async def cb_consent_give(
 
     await bot.send_message(
         chat_id=chat_id,
-        text=texts.GREETING.format(user_name=display_name),
+        text=texts.render(texts.GREETING, cfg.club, user_name=display_name),
         reply_markup=main_menu(),
     )
     admin_greeting = await _admin_greeting(db, cfg, admins, sender.id)
@@ -197,15 +215,78 @@ async def cb_consent_give(
 
 
 @router.message(Command("privacy", "pdn"))
-async def cmd_privacy(message: Message) -> None:
+async def cmd_privacy(message: Message, cfg: AppConfig) -> None:
     """Политика обработки персональных данных (152-ФЗ) — доступна и без согласия."""
-    await message.answer(texts.PRIVACY_TEXT, reply_markup=main_menu())
+    await message.answer(
+        texts.render(texts.PRIVACY_TEXT, cfg.club),
+        reply_markup=privacy_keyboard(),
+    )
 
 
 @router.message(Command("help"))
-async def cmd_help(message: Message) -> None:
+async def cmd_help(message: Message, cfg: AppConfig) -> None:
     """Краткая справка по работе с ботом."""
-    await message.answer(texts.HELP_TEXT, reply_markup=main_menu())
+    await message.answer(texts.render(texts.HELP_TEXT, cfg.club), reply_markup=main_menu())
+
+
+# --- отзыв согласия на обработку ПДн (ч. 2 ст. 9 152-ФЗ) -------------------
+@router.callback_query(F.data == CB_CONSENT_REVOKE)
+async def cb_consent_revoke(callback: CallbackQuery, bot: Bot) -> None:
+    """Кнопка «🚫 Отозвать согласие»: просим подтвердить серьёзное действие."""
+    await edit_or_send(
+        bot,
+        callback.message.chat.id,
+        callback.message.message_id,
+        texts.CONSENT_REVOKE_CONFIRM,
+        revoke_confirm_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == CB_CONSENT_REVOKE_NO)
+async def cb_consent_revoke_no(callback: CallbackQuery, bot: Bot) -> None:
+    """Отзыв отменён — возвращаем текст политики."""
+    await edit_or_send(
+        bot,
+        callback.message.chat.id,
+        callback.message.message_id,
+        texts.CONSENT_REVOKE_CANCELED,
+        None,
+    )
+    await callback.answer("Отзыв согласия отменён")
+
+
+@router.callback_query(F.data == CB_CONSENT_REVOKE_YES)
+async def cb_consent_revoke_yes(
+    callback: CallbackQuery,
+    state: FSMContext,
+    db: Database,
+    bot: Bot,
+    cfg: AppConfig,
+) -> None:
+    """Отзыв согласия: обработка ПДн прекращается, бот перестаёт работать."""
+    sender = callback.from_user
+    if sender is None:
+        await callback.answer()
+        return
+
+    await state.clear()
+    await db.set_consent(sender.id, granted=False)
+    _consent_gate.forget(sender.id)
+
+    await edit_or_send(
+        bot,
+        callback.message.chat.id,
+        callback.message.message_id,
+        texts.render(
+            texts.CONSENT_REVOKED,
+            cfg.club,
+            revoked_at=now_full_text(cfg.timezone),
+        ),
+        consent_keyboard(),
+    )
+    await callback.answer("Согласие отозвано", show_alert=True)
+    logger.info("Пользователь %s отозвал согласие на обработку ПДн", sender.id)
 
 
 @router.message(Command("admin", "stats", "admins", "adminlist"))
@@ -344,7 +425,7 @@ async def msg_enter_custom_time(message: Message, state: FSMContext) -> None:
 # 4. Шаг 3 — имя
 # --------------------------------------------------------------------------- #
 @router.message(StateFilter(BookingFSM.entering_name), F.text)
-async def msg_enter_name(message: Message, state: FSMContext) -> None:
+async def msg_enter_name(message: Message, state: FSMContext, cfg: AppConfig) -> None:
     """Клиент указал имя для брони — показываем реквизиты и ждём чек."""
     if is_menu_button_text(message.text):
         await message.answer(
@@ -370,24 +451,137 @@ async def msg_enter_name(message: Message, state: FSMContext) -> None:
         return
 
     await state.update_data({DATA_CLIENT_NAME: client_name})
-    await state.set_state(BookingFSM.waiting_receipt)
+    await state.set_state(BookingFSM.choosing_payment)
+
+    # По правилам клуба полная предоплата нужна только на ночные пакеты
+    # и только в выходные (ПТ–ВС); в остальных случаях можно платить на месте.
+    day = datetime.now(cfg.timezone).date()
+    prepaid = texts.prepayment_required(time_key, day)
+    rules_template = texts.PAYMENT_RULES_PREPAID if prepaid else texts.PAYMENT_RULES_ON_SPOT
 
     await message.answer(
-        texts.PAYMENT_DETAILS.format(
+        texts.render(
+            texts.PAYMENT_DETAILS,
+            cfg.club,
             tariff=escape_html(tariff_title(tariff_key) or "—"),
             time_slot=escape_html(time_slot),
             client_name=escape_html(client_name),
-            price_hint=escape_html(texts.tariff_price_hint(tariff_key, time_key or "")),
-            payment_system=texts.PAYMENT_SYSTEM,
-            payment_card=texts.PAYMENT_CARD,
-            payment_holder=texts.PAYMENT_HOLDER,
+            amount=texts.amount_text(tariff_key, time_key, day),
+            payment_rules=texts.render(rules_template, cfg.club),
         ),
-        reply_markup=booking_cancel_keyboard(),
+        reply_markup=payment_choice_keyboard(prepaid),
     )
+    logger.debug("Бронирование: имя %s, способ оплаты (предоплата: %s)", client_name, prepaid)
 
 
 # --------------------------------------------------------------------------- #
-# 5. Шаг 4 — фото чека
+# 5. Шаг 4 — способ оплаты: прислать чек или оплатить на месте
+# --------------------------------------------------------------------------- #
+@router.callback_query(StateFilter(BookingFSM.choosing_payment), F.data.startswith(CB_PAY_PREFIX))
+async def cb_choose_payment(
+    callback: CallbackQuery,
+    state: FSMContext,
+    db: Database,
+    bot: Bot,
+    cfg: AppConfig,
+) -> None:
+    """Клиент выбрал, как платит: чеком сейчас или на месте, при входе в клуб."""
+    sender = callback.from_user
+    if sender is None:
+        await callback.answer()
+        return
+
+    way = parse_payment_way(callback.data)
+    if way is None:
+        await callback.answer("Неизвестный способ оплаты — выберите кнопкой", show_alert=True)
+        return
+
+    data = await state.get_data()
+    tariff_key = data.get(DATA_TARIFF_KEY)
+    time_key = data.get(DATA_TIME_KEY)
+    time_slot = data.get(DATA_TIME_SLOT)
+    client_name = data.get(DATA_CLIENT_NAME)
+
+    if not tariff_key or not time_slot or not client_name:
+        await state.clear()
+        await callback.answer(texts.BOOKING_SESSION_LOST, show_alert=True)
+        logger.info("Бронирование: черновик заявки потерян (перезапуск бота)")
+        return
+
+    day = datetime.now(cfg.timezone).date()
+    chat_id = callback.message.chat.id
+
+    # Ночной пакет в ПТ–ВС — только по полной предоплате: кнопки «на месте» нет,
+    # но на всякий случай проверяем и здесь (кнопку могли нажать из старого
+    # сообщения, отправленного в будни).
+    if way == PAY_WAY_SPOT and texts.prepayment_required(time_key, day):
+        await callback.answer(
+            texts.PREPAY_REQUIRED_ALERT,
+            show_alert=True,
+        )
+        return
+
+    if way == PAY_WAY_CHECK:
+        await state.set_state(BookingFSM.waiting_receipt)
+        await edit_or_send(
+            bot,
+            chat_id,
+            callback.message.message_id,
+            texts.render(texts.RECEIPT_WAITING, cfg.club),
+            booking_cancel_keyboard(),
+        )
+        await callback.answer()
+        return
+
+    # Оплата на месте: заявка создаётся без чека, администратор видит пометку.
+    await state.clear()
+    user = await db.upsert_user(sender.id, sender.username, sender.first_name)
+    booking = await db.add_booking(
+        user_id=user.user_id,
+        tariff=tariff_title(tariff_key) or tariff_key,
+        time_slot=time_slot,
+        client_name=client_name,
+        receipt_file_id=None,
+    )
+
+    await edit_or_send(
+        bot,
+        chat_id,
+        callback.message.message_id,
+        texts.render(
+            texts.BOOKING_SPOT_RECEIVED,
+            cfg.club,
+            booking_id=booking.id,
+            tariff=escape_html(booking.tariff),
+            time_slot=escape_html(booking.time_slot),
+            client_name=escape_html(booking.client_name),
+        ),
+        None,
+    )
+    await bot.send_message(chat_id=chat_id, text=texts.MENU_HINT, reply_markup=main_menu())
+
+    report = await deliver_new_booking(bot, cfg, db, booking, user)
+    for admin_id, message_id in report.notifications:
+        await db.add_notification(booking.id, admin_id, message_id)
+    if not report.ok:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=texts.render(texts.RECEIPT_ADMIN_UNAVAILABLE, cfg.club, booking_id=booking.id),
+        )
+
+    logger.info(
+        "Заявка №%s создана (оплата на месте): user=%s tariff=%s time=%s, администраторам: %s",
+        booking.id,
+        user.user_id,
+        booking.tariff,
+        booking.time_slot,
+        report.summary(),
+    )
+    await callback.answer()
+
+
+# --------------------------------------------------------------------------- #
+# 6. Шаг 4б — фото чека
 # --------------------------------------------------------------------------- #
 @router.message(StateFilter(BookingFSM.waiting_receipt), F.photo)
 async def msg_receive_receipt(
@@ -425,12 +619,16 @@ async def msg_receive_receipt(
     )
     await state.clear()
 
+    day = datetime.now(cfg.timezone).date()
     await message.answer(
-        texts.RECEIPT_RECEIVED.format(
+        texts.render(
+            texts.RECEIPT_RECEIVED,
+            cfg.club,
             booking_id=booking.id,
             tariff=escape_html(booking.tariff),
             time_slot=escape_html(booking.time_slot),
             client_name=escape_html(booking.client_name),
+            amount=texts.amount_text(tariff_key, data.get(DATA_TIME_KEY), day),
         ),
         reply_markup=main_menu(),
     )
@@ -441,7 +639,13 @@ async def msg_receive_receipt(
     for admin_id, message_id in report.notifications:
         await db.add_notification(booking.id, admin_id, message_id)
     if not report.ok:
-        await message.answer(texts.RECEIPT_ADMIN_UNAVAILABLE.format(booking_id=booking.id))
+        await message.answer(
+            texts.render(
+                texts.RECEIPT_ADMIN_UNAVAILABLE,
+                cfg.club,
+                booking_id=booking.id,
+            )
+        )
 
     logger.info(
         "Заявка №%s создана: user=%s tariff=%s time=%s, администраторам: %s",
@@ -454,7 +658,7 @@ async def msg_receive_receipt(
 
 
 @router.message(StateFilter(BookingFSM.waiting_receipt))
-async def msg_receipt_expected(message: Message) -> None:
+async def msg_receipt_expected(message: Message, cfg: AppConfig) -> None:
     """Клиент прислал что-то вместо фото чека (текст, документ, стикер…)."""
     if is_menu_button_text(message.text):
         await message.answer(
@@ -464,11 +668,7 @@ async def msg_receipt_expected(message: Message) -> None:
         return
 
     await message.answer(
-        texts.RECEIPT_NOT_PHOTO.format(
-            payment_system=texts.PAYMENT_SYSTEM,
-            payment_card=texts.PAYMENT_CARD,
-            payment_holder=texts.PAYMENT_HOLDER,
-        ),
+        texts.render(texts.RECEIPT_NOT_PHOTO, cfg.club),
         reply_markup=booking_cancel_keyboard(),
     )
 
@@ -505,24 +705,30 @@ async def cb_booking_outdated(callback: CallbackQuery) -> None:
 # 7. Главное меню
 # --------------------------------------------------------------------------- #
 @router.message(F.text == MENU_PRICE)
-async def msg_price_list(message: Message) -> None:
-    """Прайс-лист: Standart, VIP, S VIP, Double и ночные пакеты."""
-    await message.answer(texts.build_price_list(), reply_markup=main_menu())
+async def msg_price_list(message: Message, cfg: AppConfig) -> None:
+    """Прайс-лист: Standart, VIP, S VIP, Double, утро/день/ночь."""
+    await message.answer(texts.build_price_list(cfg.club), reply_markup=main_menu())
 
 
 @router.message(F.text == MENU_RULES)
-async def msg_rules(message: Message) -> None:
+async def msg_rules(message: Message, cfg: AppConfig) -> None:
     """Правила клуба и условия бронирования."""
-    await message.answer(texts.build_rules_text(), reply_markup=main_menu())
+    await message.answer(texts.build_rules_text(cfg.club), reply_markup=main_menu())
+
+
+@router.message(F.text == MENU_FAQ)
+async def msg_faq(message: Message, cfg: AppConfig) -> None:
+    """Частые вопросы: ночь, пакеты, предоплата и мошенники."""
+    await message.answer(texts.build_faq_text(cfg.club), reply_markup=main_menu())
 
 
 @router.message(F.text == MENU_CONTACTS)
-async def msg_contacts(message: Message) -> None:
+async def msg_contacts(message: Message, cfg: AppConfig) -> None:
     """Контакты администратора: текст + карточка контакта (тап — звонок)."""
-    await message.answer(texts.build_contacts_text(), reply_markup=main_menu())
+    await message.answer(texts.build_contacts_text(cfg.club), reply_markup=main_menu())
     await message.answer_contact(
-        phone_number=texts.ADMIN_PHONE_RAW,
-        first_name=texts.ADMIN_NAME,
+        phone_number=cfg.club.admin_phone_raw,
+        first_name=cfg.club.admin_name,
     )
 
 
@@ -553,6 +759,8 @@ async def msg_photo_without_booking(message: Message, state: FSMContext) -> None
         BookingFSM.choosing_time.state: texts.STEP_HINT_TIME_BUTTON,
         BookingFSM.entering_custom_time.state: texts.STEP_HINT_TIME,
         BookingFSM.entering_name.state: texts.STEP_HINT_NAME,
+        BookingFSM.choosing_payment.state: texts.STEP_HINT_PAYMENT,
+        BookingFSM.waiting_receipt.state: texts.STEP_HINT_RECEIPT,
     }
     hint = step_hints.get(current_state)
     if hint:
