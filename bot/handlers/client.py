@@ -25,6 +25,7 @@ from aiogram.types import CallbackQuery, Message
 from bot import texts
 from bot.config import AppConfig
 from bot.db.database import Database
+from bot.db.models import AdminRole
 from bot.filters.access import IsPrivateChat
 from bot.keyboards.inline import (
     BOOKING_CALLBACK_PREFIXES,
@@ -47,6 +48,7 @@ from bot.keyboards.reply import (
     main_menu,
 )
 from bot.middlewares.consent import ConsentMiddleware
+from bot.services.admins import AdminRegistry
 from bot.services.booking import (
     clean_client_name,
     clean_custom_time,
@@ -84,6 +86,29 @@ router.message.outer_middleware(_consent_gate)
 router.callback_query.outer_middleware(_consent_gate)
 
 
+async def _admin_greeting(
+    db: Database,
+    cfg: AppConfig,
+    admins: AdminRegistry | None,
+    user_id: int,
+) -> str | None:
+    """Если пользователь — администратор клуба, вернуть приветствие с его ролью.
+
+    Администраторов может быть несколько (``ADMIN_IDS`` в ``.env`` плюс
+    добавленные через панель), поэтому проверяем не один ID, а реестр/базу.
+    """
+    if admins is not None:
+        is_admin = await admins.is_admin(user_id)
+    else:
+        is_admin = cfg.is_env_admin(user_id) or await db.is_active_admin(user_id)
+    if not is_admin:
+        return None
+
+    admin = await db.get_admin(user_id)
+    role = admin.role_title if admin is not None else AdminRole.title(AdminRole.OPERATOR)
+    return texts.ADMIN_START_INFO.format(role=role)
+
+
 # --------------------------------------------------------------------------- #
 # 1. Служебные команды
 # --------------------------------------------------------------------------- #
@@ -105,6 +130,7 @@ async def cmd_start(
     state: FSMContext,
     db: Database,
     cfg: AppConfig,
+    admins: AdminRegistry | None = None,
 ) -> None:
     """Точка входа: согласие на обработку ПДн (152-ФЗ) или главное меню."""
     sender = message.from_user
@@ -125,8 +151,9 @@ async def cmd_start(
         texts.GREETING.format(user_name=escape_html(user.display_name)),
         reply_markup=main_menu(),
     )
-    if sender.id == cfg.admin_id:
-        await message.answer(texts.ADMIN_START_INFO)
+    admin_greeting = await _admin_greeting(db, cfg, admins, sender.id)
+    if admin_greeting:
+        await message.answer(admin_greeting)
 
 
 @router.callback_query(F.data == CB_CONSENT_GIVE)
@@ -136,6 +163,7 @@ async def cb_consent_give(
     db: Database,
     bot: Bot,
     cfg: AppConfig,
+    admins: AdminRegistry | None = None,
 ) -> None:
     """Кнопка «✅ Я согласен»: фиксируем согласие и открываем меню."""
     sender = callback.from_user
@@ -162,8 +190,9 @@ async def cb_consent_give(
         text=texts.GREETING.format(user_name=display_name),
         reply_markup=main_menu(),
     )
-    if sender.id == cfg.admin_id:
-        await bot.send_message(chat_id=chat_id, text=texts.ADMIN_START_INFO)
+    admin_greeting = await _admin_greeting(db, cfg, admins, sender.id)
+    if admin_greeting:
+        await bot.send_message(chat_id=chat_id, text=admin_greeting)
     logger.info("Пользователь %s дал согласие на обработку ПДн", sender.id)
 
 
@@ -177,6 +206,24 @@ async def cmd_privacy(message: Message) -> None:
 async def cmd_help(message: Message) -> None:
     """Краткая справка по работе с ботом."""
     await message.answer(texts.HELP_TEXT, reply_markup=main_menu())
+
+
+@router.message(Command("admin", "stats", "admins", "adminlist"))
+async def cmd_admin_no_access(message: Message, db: Database) -> None:
+    """Команды админ-панели от пользователя без прав.
+
+    Админ-роутер такие события не принимает (фильтр :class:`IsAdmin`), поэтому
+    они доходят сюда. Молчать нельзя: человек должен понимать, почему панель не
+    открылась — особенно если его учётную запись администратора отключили.
+    """
+    sender = message.from_user
+    admin = await db.get_admin(sender.id) if sender is not None else None
+    if admin is not None and not admin.is_active:
+        await message.answer(texts.ADMIN_NOT_ACTIVE, reply_markup=main_menu())
+        logger.info("Отключённый администратор %s запрашивал панель", sender.id)
+        return
+    await message.answer(texts.ADMIN_NO_ACCESS, reply_markup=main_menu())
+    logger.info("Пользователь %s запрашивал админ-панель без прав", sender.id if sender else "?")
 
 
 # --------------------------------------------------------------------------- #
@@ -388,16 +435,21 @@ async def msg_receive_receipt(
         reply_markup=main_menu(),
     )
 
-    notified = await deliver_new_booking(bot, cfg, booking, user)
-    if not notified:
+    # Заявка уходит всем активным администраторам; копии запоминаем в базе,
+    # чтобы после решения погасить кнопки у тех, кто не успел нажать.
+    report = await deliver_new_booking(bot, cfg, db, booking, user)
+    for admin_id, message_id in report.notifications:
+        await db.add_notification(booking.id, admin_id, message_id)
+    if not report.ok:
         await message.answer(texts.RECEIPT_ADMIN_UNAVAILABLE.format(booking_id=booking.id))
 
     logger.info(
-        "Заявка №%s создана: user=%s tariff=%s time=%s",
+        "Заявка №%s создана: user=%s tariff=%s time=%s, администраторам: %s",
         booking.id,
         user.user_id,
         booking.tariff,
         booking.time_slot,
+        report.summary(),
     )
 
 

@@ -1,9 +1,11 @@
 """Слой работы с базой данных (SQLite + aiosqlite)."""
 
 from bot.db.database import Database, init_database
-from bot.db.models import Booking, BookingStats, BookingStatus, User
+from bot.db.models import Admin, AdminRole, Booking, BookingStats, BookingStatus, User
 
 __all__ = [
+    "Admin",
+    "AdminRole",
     "Booking",
     "BookingStats",
     "BookingStatus",

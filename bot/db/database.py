@@ -24,11 +24,22 @@ from zoneinfo import ZoneInfo
 
 import aiosqlite
 
-from bot.db.models import Booking, BookingStats, BookingStatus, User
+from bot.db.models import Admin, AdminRole, Booking, BookingStats, BookingStatus, User
 
 logger = logging.getLogger(__name__)
 
 SCHEMA_FILE: Path = Path(__file__).with_name("schema.sql")
+
+#: Столбцы, которые добавляются в уже существующие базы данных (мягкая миграция).
+BOOKINGS_MIGRATIONS: dict[str, str] = {
+    "decided_by": "ALTER TABLE bookings ADD COLUMN decided_by INTEGER",
+    "decided_at": "ALTER TABLE bookings ADD COLUMN decided_at DATETIME",
+}
+
+#: Индексы, создаваемые после миграции столбцов (в старой базе их ещё нет).
+POST_MIGRATION_INDEXES: tuple[str, ...] = (
+    "CREATE INDEX IF NOT EXISTS idx_bookings_decided ON bookings (decided_by)",
+)
 
 
 class Database:
@@ -70,6 +81,7 @@ class Database:
         await self._connection.execute("PRAGMA foreign_keys=ON")
         await self._connection.executescript(SCHEMA_FILE.read_text(encoding="utf-8"))
         await self._connection.commit()
+        await self._migrate()
 
         logger.info("База данных готова: %s", self._path)
 
@@ -83,6 +95,29 @@ class Database:
     def now(self) -> str:
         """Текущее время клуба в ISO-8601 (пишется в ``created_at``)."""
         return datetime.now(self._timezone).isoformat(timespec="seconds")
+
+    async def _table_columns(self, table: str) -> set[str]:
+        """Набор столбцов таблицы — нужен для мягкой миграции старых баз."""
+        if not table.isidentifier():  # защита от подстановки в PRAGMA
+            raise ValueError(f"Некорректное имя таблицы: {table!r}")
+        async with self._lock, self.connection.execute(f"PRAGMA table_info({table})") as cursor:
+            rows = await cursor.fetchall()
+        return {str(row["name"]) for row in rows}
+
+    async def _migrate(self) -> None:
+        """Добавить недостающие столбцы в базу, созданную предыдущей версией бота.
+
+        ``schema.sql`` использует ``CREATE TABLE IF NOT EXISTS``, поэтому в уже
+        существующей базе новые столбцы сами не появятся — добавляем их через
+        ``ALTER TABLE``. Операция идемпотентна и не трогает данные.
+        """
+        columns = await self._table_columns("bookings")
+        for column, ddl in BOOKINGS_MIGRATIONS.items():
+            if column not in columns:
+                await self._execute(ddl)
+                logger.info("Миграция: в таблицу bookings добавлен столбец %s", column)
+        for ddl in POST_MIGRATION_INDEXES:
+            await self._execute(ddl)
 
     async def _fetch_one(self, sql: str, params: tuple[object, ...] = ()) -> Row | None:
         async with self._lock, self.connection.execute(sql, params) as cursor:
@@ -216,11 +251,20 @@ class Database:
         row = await self._fetch_one("SELECT * FROM bookings WHERE id = ?", (booking_id,))
         return Booking.from_row(row) if row is not None else None
 
-    async def set_status_if_pending(self, booking_id: int, status: str) -> bool:
+    async def set_status_if_pending(
+        self,
+        booking_id: int,
+        status: str,
+        decided_by: int | None = None,
+    ) -> bool:
         """Перевести заявку в новый статус, только если она ещё ``pending``.
 
+        Вместе со статусом атомарно пишутся ``decided_by`` (кто из
+        администраторов принял решение) и ``decided_at``.
+
         Возвращает ``True``, если статус изменён этим вызовом, и ``False``, если
-        заявку обработали раньше (защита от двойного нажатия кнопки админом).
+        заявку обработали раньше — это защита и от двойного нажатия одним
+        админом, и от гонки, когда кнопки жмут два администратора одновременно.
         """
         if status not in (BookingStatus.APPROVED, BookingStatus.REJECTED):
             raise ValueError(f"Статус после решения должен быть approved/rejected, дано: {status!r}")
@@ -228,12 +272,159 @@ class Database:
         affected = await self._execute(
             """
             UPDATE bookings
-               SET status = ?
+               SET status = ?, decided_by = ?, decided_at = ?
              WHERE id = ? AND status = 'pending'
             """,
-            (status, booking_id),
+            (status, decided_by, self.now(), booking_id),
         )
         return affected == 1
+
+    # ------------------------------------------------------------------ #
+    # admins — несколько администраторов клуба
+    # ------------------------------------------------------------------ #
+    async def add_admin(
+        self,
+        user_id: int,
+        role: str = AdminRole.OPERATOR,
+        added_by: int | None = None,
+    ) -> Admin:
+        """Добавить администратора или включить/обновить уже существующего."""
+        if role not in AdminRole.ALL:
+            raise ValueError(f"Недопустимая роль администратора: {role!r}")
+
+        await self._execute(
+            """
+            INSERT INTO admins (user_id, role, is_active, added_by, created_at)
+            VALUES (?, ?, 1, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                role      = excluded.role,
+                is_active = 1,
+                added_by  = COALESCE(excluded.added_by, admins.added_by)
+            """,
+            (user_id, role, added_by, self.now()),
+        )
+        admin = await self.get_admin(user_id)
+        if admin is None:
+            raise RuntimeError(f"Не удалось прочитать администратора {user_id} после записи")
+        logger.info("Администратор %s сохранён (роль %s)", user_id, role)
+        return admin
+
+    async def get_admin(self, user_id: int) -> Admin | None:
+        row = await self._fetch_one("SELECT * FROM admins WHERE user_id = ?", (user_id,))
+        return Admin.from_row(row) if row is not None else None
+
+    async def is_active_admin(self, user_id: int) -> bool:
+        """Проверка доступа: администратор существует и не отключён."""
+        row = await self._fetch_one(
+            "SELECT is_active FROM admins WHERE user_id = ?",
+            (user_id,),
+        )
+        return bool(row is not None and row["is_active"])
+
+    async def list_admins(self, *, active_only: bool = False) -> list[Admin]:
+        """Список администраторов: сначала владельцы, затем по дате добавления."""
+        sql = (
+            "SELECT * FROM admins "
+            "WHERE is_active = 1 "
+            if active_only
+            else "SELECT * FROM admins "
+        )
+        rows = await self._fetch_all(
+            sql
+            + "ORDER BY CASE role WHEN 'owner' THEN 0 ELSE 1 END, created_at, user_id"
+        )
+        return [Admin.from_row(row) for row in rows]
+
+    async def active_admin_ids(self) -> tuple[int, ...]:
+        """ID активных администраторов — получатели уведомлений о новых бронях."""
+        rows = await self._fetch_all(
+            "SELECT user_id FROM admins WHERE is_active = 1 "
+            "ORDER BY CASE role WHEN 'owner' THEN 0 ELSE 1 END, created_at, user_id"
+        )
+        return tuple(int(row["user_id"]) for row in rows)
+
+    async def set_admin_active(self, user_id: int, active: bool) -> bool:
+        """Отключить/включить администратора, не удаляя его из базы."""
+        affected = await self._execute(
+            "UPDATE admins SET is_active = ? WHERE user_id = ?",
+            (1 if active else 0, user_id),
+        )
+        return affected == 1
+
+    async def set_admin_role(self, user_id: int, role: str) -> bool:
+        """Изменить роль администратора (``owner`` / ``operator``)."""
+        if role not in AdminRole.ALL:
+            raise ValueError(f"Недопустимая роль администратора: {role!r}")
+        affected = await self._execute(
+            "UPDATE admins SET role = ? WHERE user_id = ?",
+            (role, user_id),
+        )
+        return affected == 1
+
+    async def count_active_owners(self) -> int:
+        """Сколько сейчас активных владельцев — защита от потери управления."""
+        row = await self._fetch_one(
+            "SELECT COUNT(*) AS n FROM admins WHERE role = ? AND is_active = 1",
+            (AdminRole.OWNER,),
+        )
+        return int(row["n"]) if row is not None else 0
+
+    async def remove_admin(self, user_id: int) -> bool:
+        """Удалить администратора из базы (клиентские данные пользователя не трогаем)."""
+        affected = await self._execute("DELETE FROM admins WHERE user_id = ?", (user_id,))
+        logger.info("Администратор %s удалён: %s", user_id, affected == 1)
+        return affected == 1
+
+    async def count_admins(self) -> tuple[int, int]:
+        """Вернуть ``(всего администраторов, активных)``."""
+        row = await self._fetch_one(
+            "SELECT COUNT(*) AS total, COALESCE(SUM(is_active), 0) AS active FROM admins"
+        )
+        if row is None:
+            return 0, 0
+        return int(row["total"]), int(row["active"])
+
+    async def sync_env_admins(self, admin_ids: tuple[int, ...] | list[int]) -> None:
+        """Сверить таблицу ``admins`` со списком из ``.env`` (вызывается при старте).
+
+        * первый ID становится владельцем (``owner``) и всегда активен — его
+          нельзя удалить из панели;
+        * остальные ID из ``.env`` добавляются администраторами (``operator``),
+          если их ещё нет, и включаются, если были отключены;
+        * администраторы, добавленные через панель, не трогаются — ``.env``
+          задаёт только стартовый (обязательный) набор.
+        """
+        for index, admin_id in enumerate(admin_ids):
+            existing = await self.get_admin(admin_id)
+            if index == 0:
+                await self.add_admin(admin_id, role=AdminRole.OWNER, added_by=None)
+            elif existing is None:
+                await self.add_admin(admin_id, role=AdminRole.OPERATOR, added_by=None)
+            else:
+                await self.set_admin_active(admin_id, True)
+
+    # ------------------------------------------------------------------ #
+    # booking_notifications — копии уведомлений у каждого администратора
+    # ------------------------------------------------------------------ #
+    async def add_notification(self, booking_id: int, admin_id: int, message_id: int) -> None:
+        """Запомнить, какому админу и каким сообщением отправлена заявка."""
+        await self._execute(
+            """
+            INSERT OR IGNORE INTO booking_notifications
+                (booking_id, admin_id, message_id, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (booking_id, admin_id, message_id, self.now()),
+        )
+
+    async def list_notifications(self, booking_id: int) -> list[tuple[int, int]]:
+        """Пары ``(admin_id, message_id)`` — кому отправлялась эта заявка."""
+        rows = await self._fetch_all(
+            "SELECT admin_id, message_id FROM booking_notifications WHERE booking_id = ? "
+            "ORDER BY id",
+            (booking_id,),
+        )
+        return [(int(row["admin_id"]), int(row["message_id"])) for row in rows]
 
     async def list_bookings(
         self,
@@ -333,6 +524,7 @@ class Database:
         rows = await self._fetch_all("SELECT status, COUNT(*) AS n FROM bookings GROUP BY status")
         by_status: dict[str, int] = {str(row["status"]): int(row["n"]) for row in rows}
         users_total, users_consented = await self.count_users()
+        admins_total, admins_active = await self.count_admins()
 
         total = sum(by_status.values())
         return BookingStats(
@@ -342,14 +534,24 @@ class Database:
             rejected=by_status.get(BookingStatus.REJECTED, 0),
             users=users_total,
             consented=users_consented,
+            admins=admins_total,
+            admins_active=admins_active,
         )
 
 
 async def init_database(path: str | Path, timezone: ZoneInfo) -> Database:
-    """Создать и открыть базу данных (используется при старте и в ``--init-db``)."""
+    """Создать и открыть базу данных (используется при старте и в ``--init-db``).
+
+    Если открытие не удалось, соединение закрывается: иначе поток aiosqlite
+    остаётся живым и процесс не завершается.
+    """
     database = Database(path, timezone=timezone)
-    await database.connect()
+    try:
+        await database.connect()
+    except BaseException:
+        await database.close()
+        raise
     return database
 
 
-__all__ = ["Database", "init_database"]
+__all__ = ["BOOKINGS_MIGRATIONS", "POST_MIGRATION_INDEXES", "Database", "init_database"]

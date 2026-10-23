@@ -2,15 +2,22 @@
 
 В ``.env`` обязательны два значения (см. ``.env.example``):
 
-* ``BOT_TOKEN`` — токен бота от @BotFather;
-* ``ADMIN_ID``  — числовой Telegram ID администратора клуба.
+* ``BOT_TOKEN``  — токен бота от @BotFather;
+* ``ADMIN_IDS``  — числовые Telegram ID администраторов клуба через запятую.
+  Первый ID считается **владельцем** бота: он управляет списком администраторов
+  и не может быть удалён из панели. Переменная ``ADMIN_ID`` (один ID) тоже
+  поддерживается — для обратной совместимости.
 
 Дополнительно можно переопределить ``DB_PATH``, ``TZ`` и ``LOG_LEVEL``.
+
+``.env`` задаёт лишь стартовый набор администраторов: остальных можно добавлять
+и отключать прямо в админ-панели, они хранятся в таблице ``admins`` базы данных.
 """
 
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -42,10 +49,23 @@ class AppConfig:
     """Неизменяемый снимок настроек приложения."""
 
     bot_token: str
-    admin_id: int
+    admin_ids: tuple[int, ...]
     db_path: Path
     timezone: ZoneInfo
     log_level: str = DEFAULT_LOG_LEVEL
+
+    @property
+    def admin_id(self) -> int:
+        """Владелец бота — первый ID из ``ADMIN_IDS``.
+
+        Свойство оставлено для совместимости с кодом, рассчитанным на одного
+        администратора (например, персональный набор команд в меню Telegram).
+        """
+        return self.admin_ids[0]
+
+    def is_env_admin(self, user_id: int) -> bool:
+        """Входит ли пользователь в список администраторов из ``.env``."""
+        return user_id in self.admin_ids
 
 
 def _read_token() -> str:
@@ -65,23 +85,49 @@ def _read_token() -> str:
     return token
 
 
-def _read_admin_id() -> int:
-    raw = (os.getenv("ADMIN_ID") or "").strip()
+#: Разделители списка ID в ADMIN_IDS: запятая, точка с запятой, пробел, новая строка.
+_ADMIN_IDS_SPLIT = re.compile(r"[,;\s]+")
+
+_ID_HINT = (
+    "Это не @username, а именно числовой ID — узнать его можно у бота @userinfobot."
+)
+
+
+def _read_admin_ids() -> tuple[int, ...]:
+    """Прочитать список ID администраторов: ``ADMIN_IDS`` или устаревший ``ADMIN_ID``."""
+    raw = (os.getenv("ADMIN_IDS") or "").strip()
+    variable = "ADMIN_IDS"
+    if not raw:
+        raw = (os.getenv("ADMIN_ID") or "").strip()
+        variable = "ADMIN_ID"
     if not raw:
         raise ConfigError(
-            "Не найден ADMIN_ID — числовой Telegram ID администратора.\n"
-            "Узнать свой ID можно у бота @userinfobot, затем вписать в .env: ADMIN_ID=123456789"
+            "Не найден ADMIN_IDS — числовые Telegram ID администраторов клуба.\n"
+            "Узнайте ID у бота @userinfobot и впишите в .env, например:\n"
+            "  ADMIN_IDS=123456789,987654321   # первый ID — владелец бота\n"
+            "Для одного администратора достаточно ADMIN_IDS=123456789."
         )
-    try:
-        admin_id = int(raw)
-    except ValueError as exc:
-        raise ConfigError(
-            f"ADMIN_ID должен быть числом (например 123456789), получено: {raw!r}. "
-            "Это не @username, а именно числовой ID — узнайте его у @userinfobot."
-        ) from exc
-    if admin_id <= 0:
-        raise ConfigError(f"ADMIN_ID должен быть положительным числом, получено: {admin_id}")
-    return admin_id
+
+    admin_ids: list[int] = []
+    for chunk in _ADMIN_IDS_SPLIT.split(raw):
+        if not chunk:
+            continue
+        try:
+            value = int(chunk)
+        except ValueError as exc:
+            raise ConfigError(
+                f"{variable}: «{chunk}» не похоже на числовой Telegram ID. {_ID_HINT}"
+            ) from exc
+        if value <= 0:
+            raise ConfigError(
+                f"{variable}: ID должен быть положительным числом, получено {value}. {_ID_HINT}"
+            )
+        if value not in admin_ids:  # сохраняем порядок и убираем дубликаты
+            admin_ids.append(value)
+
+    if not admin_ids:
+        raise ConfigError(f"{variable} заполнен, но не содержит ни одного ID. {_ID_HINT}")
+    return tuple(admin_ids)
 
 
 def _read_db_path() -> Path:
@@ -133,7 +179,7 @@ def load_config(env_file: str | Path | None = None) -> AppConfig:
 
     return AppConfig(
         bot_token=_read_token(),
-        admin_id=_read_admin_id(),
+        admin_ids=_read_admin_ids(),
         db_path=db_settings.path,
         timezone=db_settings.timezone,
         log_level=_read_log_level(),
