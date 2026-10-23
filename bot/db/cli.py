@@ -37,6 +37,11 @@ async def create_database() -> None:
         f"{stats.total} (ожидают: {stats.pending}, "
         f"подтверждено: {stats.approved}, отклонено: {stats.rejected})"
     )
+    print(f"   Администраторов: {stats.admins} (активных: {stats.admins_active})")
+    print(
+        "   Администраторы из .env появятся в таблице admins после первого запуска "
+        "бота (python main.py)."
+    )
 
 
 def main() -> None:

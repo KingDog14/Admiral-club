@@ -13,14 +13,21 @@
 * ``ad:stats``            — статистика админ-панели;
 * ``ad:list:<page>``      — страница списка активных броней;
 * ``ad:ok:<booking_id>``  — подтвердить бронь;
-* ``ad:no:<booking_id>``  — отклонить бронь.
+* ``ad:no:<booking_id>``  — отклонить бронь;
+* ``ad:admins``           — список администраторов;
+* ``ad:admin:add``        — запросить ID нового администратора;
+* ``ad:admin:cancel``     — отменить добавление администратора;
+* ``ad:admin:tg:<user_id>``  — включить/отключить администратора;
+* ``ad:admin:up:<user_id>``  — назначить владельцем;
+* ``ad:admin:dn:<user_id>``  — снять роль владельца;
+* ``ad:admin:del:<user_id>`` — удалить администратора.
 """
 
 from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from bot.db.models import Booking, BookingStatus
+from bot.db.models import Admin, AdminRole, Booking, BookingStatus
 from bot.texts import TARIFFS, TIME_CHOICES, tariff_button_label
 
 # --- идентификаторы callback_data -------------------------------------------
@@ -36,6 +43,15 @@ CB_ADMIN_LIST_PREFIX: str = "ad:list:"
 CB_ADMIN_APPROVE_PREFIX: str = "ad:ok:"
 CB_ADMIN_REJECT_PREFIX: str = "ad:no:"
 
+# Управление администраторами (доступно владельцу).
+CB_ADMIN_ADMINS: str = "ad:admins"
+CB_ADMIN_ADD: str = "ad:admin:add"
+CB_ADMIN_ADD_CANCEL: str = "ad:admin:cancel"
+CB_ADMIN_TOGGLE_PREFIX: str = "ad:admin:tg:"
+CB_ADMIN_PROMOTE_PREFIX: str = "ad:admin:up:"
+CB_ADMIN_DEMOTE_PREFIX: str = "ad:admin:dn:"
+CB_ADMIN_DELETE_PREFIX: str = "ad:admin:del:"
+
 #: Префиксы клиентского сценария бронирования (для обработки «протухших» кнопок).
 BOOKING_CALLBACK_PREFIXES: tuple[str, ...] = (
     CB_TARIFF_PREFIX,
@@ -48,6 +64,10 @@ ADMIN_CALLBACK_PREFIXES: tuple[str, ...] = (
     CB_ADMIN_LIST_PREFIX,
     CB_ADMIN_APPROVE_PREFIX,
     CB_ADMIN_REJECT_PREFIX,
+    CB_ADMIN_TOGGLE_PREFIX,
+    CB_ADMIN_PROMOTE_PREFIX,
+    CB_ADMIN_DEMOTE_PREFIX,
+    CB_ADMIN_DELETE_PREFIX,
 )
 
 #: Сколько заявок показывается на одной странице «Активных броней».
@@ -78,6 +98,22 @@ def admin_approve_callback(booking_id: int) -> str:
 
 def admin_reject_callback(booking_id: int) -> str:
     return f"{CB_ADMIN_REJECT_PREFIX}{booking_id}"
+
+
+def admin_toggle_callback(user_id: int) -> str:
+    return f"{CB_ADMIN_TOGGLE_PREFIX}{user_id}"
+
+
+def admin_promote_callback(user_id: int) -> str:
+    return f"{CB_ADMIN_PROMOTE_PREFIX}{user_id}"
+
+
+def admin_demote_callback(user_id: int) -> str:
+    return f"{CB_ADMIN_DEMOTE_PREFIX}{user_id}"
+
+
+def admin_delete_callback(user_id: int) -> str:
+    return f"{CB_ADMIN_DELETE_PREFIX}{user_id}"
 
 
 # --- парсеры callback_data --------------------------------------------------
@@ -113,6 +149,38 @@ def parse_admin_decision(data: str | None) -> tuple[str, int] | None:
         return status, int(data[len(prefix) :])
     except ValueError:
         return None
+
+
+def _parse_admin_target(data: str | None, prefix: str) -> int | None:
+    """Общий разбор ``callback_data`` с числовым ID администратора."""
+    if not data or not data.startswith(prefix):
+        return None
+    try:
+        value = int(data[len(prefix) :])
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def parse_admin_toggle(data: str | None) -> int | None:
+    """ID администратора из кнопки «включить/отключить»."""
+    return _parse_admin_target(data, CB_ADMIN_TOGGLE_PREFIX)
+
+
+def parse_admin_delete(data: str | None) -> int | None:
+    """ID администратора из кнопки «удалить»."""
+    return _parse_admin_target(data, CB_ADMIN_DELETE_PREFIX)
+
+
+def parse_admin_role(data: str | None) -> tuple[str, int] | None:
+    """Разобрать кнопку смены роли: вернуть ``(новая роль, user_id)``."""
+    promote = _parse_admin_target(data, CB_ADMIN_PROMOTE_PREFIX)
+    if promote is not None:
+        return AdminRole.OWNER, promote
+    demote = _parse_admin_target(data, CB_ADMIN_DEMOTE_PREFIX)
+    if demote is not None:
+        return AdminRole.OPERATOR, demote
+    return None
 
 
 def parse_admin_list_page(data: str | None) -> int | None:
@@ -191,11 +259,87 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
                     text="📋 Активные брони", callback_data=admin_list_callback(0)
                 )
             ],
+            [InlineKeyboardButton(text="👥 Администраторы", callback_data=CB_ADMIN_ADMINS)],
             [
                 InlineKeyboardButton(text="🔄 Обновить статистику", callback_data=CB_ADMIN_STATS)
             ],
         ]
     )
+
+
+def admin_add_cancel_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура под запросом ID нового администратора."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отменить", callback_data=CB_ADMIN_ADD_CANCEL)]
+        ]
+    )
+
+
+def admins_nav_keyboard() -> InlineKeyboardMarkup:
+    """Навигация под пустым/служебным сообщением раздела администраторов."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="➕ Добавить", callback_data=CB_ADMIN_ADD),
+                InlineKeyboardButton(text="🔄 Обновить", callback_data=CB_ADMIN_ADMINS),
+            ],
+            [InlineKeyboardButton(text="📊 Статистика", callback_data=CB_ADMIN_STATS)],
+        ]
+    )
+
+
+def admins_list_keyboard(
+    admins: list[Admin],
+    *,
+    env_owner_id: int,
+    viewer_is_owner: bool,
+) -> InlineKeyboardMarkup:
+    """Кнопки управления администраторами.
+
+    * владельцу доступны включение/отключение, смена роли и удаление;
+    * владелец из ``.env`` защищён — под ним кнопок нет;
+    * обычному администратору показываем только навигацию (управление запрещено).
+    """
+    if not viewer_is_owner:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📊 Статистика", callback_data=CB_ADMIN_STATS)]
+            ]
+        )
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for admin in admins:
+        if admin.user_id == env_owner_id:
+            continue  # защищённый владелец из .env — кнопок не даём
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="✅ Включить" if not admin.is_active else "⛔️ Отключить",
+                    callback_data=admin_toggle_callback(admin.user_id),
+                ),
+                InlineKeyboardButton(
+                    text="👤 Оператор" if admin.is_owner else "👑 Владелец",
+                    callback_data=(
+                        admin_demote_callback(admin.user_id)
+                        if admin.is_owner
+                        else admin_promote_callback(admin.user_id)
+                    ),
+                ),
+                InlineKeyboardButton(
+                    text="🗑 Удалить", callback_data=admin_delete_callback(admin.user_id)
+                ),
+            ]
+        )
+
+    rows.append(
+        [
+            InlineKeyboardButton(text="➕ Добавить", callback_data=CB_ADMIN_ADD),
+            InlineKeyboardButton(text="🔄 Обновить", callback_data=CB_ADMIN_ADMINS),
+        ]
+    )
+    rows.append([InlineKeyboardButton(text="📊 Статистика", callback_data=CB_ADMIN_STATS)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def pending_list_keyboard(
@@ -236,24 +380,41 @@ __all__ = [
     "ADMIN_CALLBACK_PREFIXES",
     "BOOKING_CALLBACK_PREFIXES",
     "CANCEL_BUTTON_TEXT",
+    "CB_ADMIN_ADD",
+    "CB_ADMIN_ADD_CANCEL",
+    "CB_ADMIN_ADMINS",
     "CB_ADMIN_APPROVE_PREFIX",
+    "CB_ADMIN_DELETE_PREFIX",
+    "CB_ADMIN_DEMOTE_PREFIX",
     "CB_ADMIN_LIST_PREFIX",
+    "CB_ADMIN_PROMOTE_PREFIX",
     "CB_ADMIN_REJECT_PREFIX",
     "CB_ADMIN_STATS",
+    "CB_ADMIN_TOGGLE_PREFIX",
     "CB_BOOKING_CANCEL",
     "CB_CONSENT_GIVE",
     "CB_TIME_PREFIX",
     "CB_TARIFF_PREFIX",
     "PENDING_PAGE_SIZE",
+    "admin_add_cancel_keyboard",
     "admin_approve_callback",
+    "admin_delete_callback",
+    "admin_demote_callback",
     "admin_list_callback",
     "admin_panel_keyboard",
+    "admin_promote_callback",
     "admin_reject_callback",
+    "admin_toggle_callback",
+    "admins_list_keyboard",
+    "admins_nav_keyboard",
     "booking_cancel_keyboard",
     "booking_decision_keyboard",
     "consent_keyboard",
     "parse_admin_decision",
+    "parse_admin_delete",
     "parse_admin_list_page",
+    "parse_admin_role",
+    "parse_admin_toggle",
     "parse_tariff_key",
     "parse_time_key",
     "pending_list_keyboard",

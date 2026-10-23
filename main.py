@@ -8,7 +8,8 @@
     python main.py --version    # версия
 
 Перед запуском нужен файл ``.env`` (см. ``.env.example``) с ``BOT_TOKEN``
-и ``ADMIN_ID``. База данных создаётся автоматически при первом старте.
+и ``ADMIN_IDS``. База данных создаётся автоматически при первом старте,
+администраторы из ``.env`` — тоже (таблица ``admins``).
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ from bot.config import AppConfig, ConfigError, load_config
 from bot.db.cli import create_database
 from bot.db.database import Database, init_database
 from bot.handlers import admin_router, client_router
+from bot.services.admins import AdminRegistry
 
 logger = logging.getLogger("admiral.bot")
 
@@ -45,10 +47,10 @@ COMMON_BOT_COMMANDS: tuple[BotCommand, ...] = (
     BotCommand(command="privacy", description="Персональные данные (152-ФЗ)"),
 )
 
-#: Дополнительная команда, видимая только в чате администратора.
-ADMIN_BOT_COMMAND: BotCommand = BotCommand(
-    command="admin",
-    description="Админ-панель: статистика и активные брони",
+#: Дополнительные команды, видимые только в чатах администраторов.
+ADMIN_BOT_COMMANDS: tuple[BotCommand, ...] = (
+    BotCommand(command="admin", description="Админ-панель: статистика и брони"),
+    BotCommand(command="admins", description="Администраторы клуба"),
 )
 
 
@@ -85,16 +87,24 @@ def setup_logging(level: str) -> None:
     logging.getLogger("aiogram.event").setLevel(logging.WARNING)
 
 
-async def _setup_bot_commands(bot: Bot, cfg: AppConfig) -> None:
-    """Прописать команды в меню Telegram (для админа — расширенный набор)."""
+async def _setup_bot_commands(bot: Bot, admin_ids: tuple[int, ...]) -> None:
+    """Прописать команды в меню Telegram.
+
+    Общий набор видят все; каждому администратору в его чате дополнительно
+    показываются ``/admin`` и ``/admins``.
+    """
     try:
         await bot.set_my_commands(list(COMMON_BOT_COMMANDS))
-        await bot.set_my_commands(
-            [*COMMON_BOT_COMMANDS, ADMIN_BOT_COMMAND],
-            scope=BotCommandScopeChat(chat_id=cfg.admin_id),
-        )
     except TelegramAPIError as exc:
-        logger.warning("Не удалось обновить список команд бота: %s", exc)
+        logger.warning("Не удалось обновить общий список команд бота: %s", exc)
+
+    admin_commands = [*COMMON_BOT_COMMANDS, *ADMIN_BOT_COMMANDS]
+    for admin_id in admin_ids:
+        try:
+            await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
+        except TelegramAPIError as exc:
+            # Администратор мог ещё не начинать диалог с ботом — не критично.
+            logger.warning("Не удалось обновить команды для администратора %s: %s", admin_id, exc)
 
 
 async def run_polling(cfg: AppConfig) -> None:
@@ -105,25 +115,32 @@ async def run_polling(cfg: AppConfig) -> None:
         token=cfg.bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
-    dispatcher = Dispatcher(storage=MemoryStorage(), db=database, cfg=cfg)
+    # Реестр администраторов: проверка доступа по таблице admins без запроса
+    # к базе на каждое сообщение. Передаётся в workflow_data как ``admins``.
+    admins = AdminRegistry(database, cfg)
+    dispatcher = Dispatcher(storage=MemoryStorage(), db=database, cfg=cfg, admins=admins)
 
     # Админ-панель подключается первой: её хендлеры имеют приоритет.
     dispatcher.include_router(admin_router)
     dispatcher.include_router(client_router)
 
     @dispatcher.startup()
-    async def on_startup(bot: Bot, db: Database, cfg: AppConfig) -> None:  # noqa: A002
+    async def on_startup(bot: Bot, db: Database, cfg: AppConfig, admins: AdminRegistry) -> None:
         # Неверный токен — единственная причина остановить запуск сразу.
         me = await bot.get_me()  # TelegramUnauthorizedError при неверном BOT_TOKEN
         logger.info("Бот @%s (id=%s) запущен, версия %s", me.username, me.id, __version__)
-        logger.info("Администратор: id=%s", cfg.admin_id)
+
+        # Синхронизируем ADMIN_IDS из .env с таблицей admins и читаем кэш.
+        admin_ids = await admins.startup()
+        logger.info("Администраторов активно: %d — %s", len(admin_ids), ", ".join(map(str, admin_ids)) or "нет")
+        logger.info("Владелец бота (первый ADMIN_IDS): id=%s", cfg.admin_id)
         logger.info("База данных: %s", db.path)
         logger.info("Часовой пояс клуба: %s", cfg.timezone)
         logger.info(
             "Прайс и правила клуба настраиваются в файле bot/texts.py "
             "(константы TARIFFS, CLUB_*, ADMIN_*)."
         )
-        await _setup_bot_commands(bot, cfg)
+        await _setup_bot_commands(bot, admin_ids)
 
     @dispatcher.shutdown()
     async def on_shutdown() -> None:

@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import sqlite3
 import sys
 import tempfile
 from datetime import datetime
@@ -56,26 +57,36 @@ from aiogram.types import (
 from bot import texts  # noqa: E402
 from bot.config import AppConfig, ConfigError, load_config  # noqa: E402
 from bot.db.database import Database, init_database  # noqa: E402
-from bot.db.models import BookingStatus  # noqa: E402
+from bot.db.models import AdminRole, BookingStatus  # noqa: E402
 from bot.filters.access import IsAdmin, IsPrivateChat  # noqa: E402
 from bot.handlers import admin as admin_handlers  # noqa: E402
 from bot.handlers import client as client_handlers  # noqa: E402
 from bot.keyboards import inline as inline_keyboards  # noqa: E402
 from bot.keyboards import reply as reply_keyboards  # noqa: E402
 from bot.middlewares.consent import ConsentMiddleware  # noqa: E402
+from bot.services.admins import AdminRegistry  # noqa: E402
 from bot.services.booking import (  # noqa: E402
     clean_client_name,
     clean_custom_time,
     is_menu_button_text,
     time_slot_text,
 )
-from bot.states import DATA_TARIFF_KEY, DATA_TIME_SLOT, BookingFSM  # noqa: E402
+from bot.services.notifications import (  # noqa: E402
+    DeliveryReport,
+    admin_recipients,
+    deliver_new_booking,
+    sync_peer_admins,
+)
+from bot.states import DATA_TARIFF_KEY, DATA_TIME_SLOT, AdminFSM, BookingFSM  # noqa: E402
 
 TEST_TOKEN = "1234567890:AAH_test_token_for_local_checks_only"
 DB_CLIENT_ID = 111_222_333  # клиент из блока проверок базы данных
 SCENARIO_CLIENT_ID = 555_666_777  # клиент сквозного сценария (без согласия в базе)
 CANCEL_CLIENT_ID = 777_000_111  # клиент для проверки отмены
-ADMIN_ID = 999_888_777
+ADMIN_ID = 999_888_777  # владелец бота (первый ADMIN_IDS)
+ADMIN_ID_2 = 888_777_666  # второй администратор из .env
+ADMIN_ID_3 = 123_456_789  # администратор, добавленный через панель
+MULTI_CLIENT_ID = 321_654_987  # клиент для проверки рассылки нескольким админам
 TEST_TZ = ZoneInfo("Asia/Sakhalin")
 
 _results: list[tuple[str, bool, str]] = []
@@ -116,17 +127,37 @@ class BotSpy:
         self.token = TEST_TOKEN
         self.default = DefaultBotProperties(parse_mode=ParseMode.HTML)
         self.session = SimpleNamespace(close=_noop)
+        self._message_ids = 1000  # «Telegram» выдаёт растущие id сообщений
+        #: chat_id → профиль, который вернёт get_chat (для подписи «решение принял …»)
+        self.profiles: dict[int, SimpleNamespace] = {}
+
+    def _sent_message(self, kwargs: dict[str, Any]) -> SimpleNamespace:
+        """Подставить результат отправки: бот использует ``message.message_id``."""
+        self._message_ids += 1
+        return SimpleNamespace(
+            message_id=self._message_ids,
+            chat=SimpleNamespace(id=kwargs.get("chat_id")),
+        )
 
     # --- путь через TelegramMethod (message.answer / callback.answer) ------- #
     async def __call__(self, method: Any, timeout: int | None = None) -> None:
         self.calls.append((type(method).__name__, method))
 
     # --- прямые вызовы bot.<method>(...) ----------------------------------- #
-    async def send_message(self, **kwargs: Any) -> None:
+    async def send_message(self, **kwargs: Any) -> Any:
         self.calls.append(("SendMessage", SimpleNamespace(**kwargs)))
+        return self._sent_message(kwargs)
 
-    async def send_photo(self, **kwargs: Any) -> None:
+    async def send_photo(self, **kwargs: Any) -> Any:
         self.calls.append(("SendPhoto", SimpleNamespace(**kwargs)))
+        return self._sent_message(kwargs)
+
+    async def get_chat(self, chat_id: int, **kwargs: Any) -> Any:
+        """Профиль пользователя — нужен, если администратора нет в таблице users."""
+        self.calls.append(("GetChat", SimpleNamespace(chat_id=chat_id, **kwargs)))
+        if chat_id in self.profiles:
+            return self.profiles[chat_id]
+        return SimpleNamespace(id=chat_id, username=None, full_name=f"Пользователь {chat_id}")
 
     async def send_contact(self, **kwargs: Any) -> None:
         self.calls.append(("SendContact", SimpleNamespace(**kwargs)))
@@ -172,17 +203,21 @@ class BotSpy:
     def new_texts(self, mark: int) -> list[str]:
         return [text_of(payload) for payload in self.new_messages(mark)]
 
+    def step_payloads(self, mark: int) -> list[Any]:
+        """Все исходящие вызовы шага: новые сообщения и правки существующих."""
+        return [
+            payload
+            for name, payload in self.since(mark)
+            if name in ("SendMessage", "SendPhoto", "EditMessageText", "EditMessageCaption")
+        ]
+
     def step_texts(self, mark: int) -> list[str]:
         """Все тексты шага: и новые сообщения, и правки существующих.
 
         Сценарий бронирования обновляет одно и то же сообщение (EditMessageText),
         поэтому для проверки «что увидел клиент» нужно учитывать оба пути.
         """
-        return [
-            text_of(payload)
-            for name, payload in self.since(mark)
-            if name in ("SendMessage", "SendPhoto", "EditMessageText", "EditMessageCaption")
-        ]
+        return [text_of(payload) for payload in self.step_payloads(mark)]
 
 
 async def _noop() -> None:
@@ -267,10 +302,11 @@ def make_fsm_context(user_id: int) -> FSMContext:
     return FSMContext(storage=storage, key=key)
 
 
-def make_cfg(db_path: Path) -> AppConfig:
+def make_cfg(db_path: Path, admin_ids: tuple[int, ...] = (ADMIN_ID,)) -> AppConfig:
+    """Конфигурация теста: по умолчанию один администратор (как в старой версии)."""
     return AppConfig(
         bot_token=TEST_TOKEN,
-        admin_id=ADMIN_ID,
+        admin_ids=admin_ids,
         db_path=db_path,
         timezone=TEST_TZ,
         log_level="ERROR",
@@ -280,7 +316,7 @@ def make_cfg(db_path: Path) -> AppConfig:
 # --------------------------------------------------------------------------- #
 # 1. Конфигурация
 # --------------------------------------------------------------------------- #
-ENV_KEYS = ("BOT_TOKEN", "ADMIN_ID", "DB_PATH", "TZ", "LOG_LEVEL")
+ENV_KEYS = ("BOT_TOKEN", "ADMIN_ID", "ADMIN_IDS", "DB_PATH", "TZ", "LOG_LEVEL")
 
 
 def _clear_env() -> None:
@@ -321,7 +357,70 @@ def test_config() -> None:
             load_config(bad_admin)
             check("ADMIN_ID=@nickname должен отклоняться", False, "исключение не поднято")
         except ConfigError as exc:
-            check("ADMIN_ID не число → понятная ошибка", "числом" in str(exc))
+            check("ADMIN_ID не число → понятная ошибка", "числовой" in str(exc))
+
+        # --- несколько администраторов через ADMIN_IDS ----------------------- #
+        _clear_env()
+        multi_env = env_dir / "multi.env"
+        multi_env.write_text(
+            f"BOT_TOKEN={TEST_TOKEN}\nADMIN_IDS={ADMIN_ID}, {ADMIN_ID_2};{ADMIN_ID_3}\n",
+            encoding="utf-8",
+        )
+        cfg_multi = load_config(multi_env)
+        check_equal(
+            "ADMIN_IDS читается списком (запятая, пробел, точка с запятой)",
+            cfg_multi.admin_ids,
+            (ADMIN_ID, ADMIN_ID_2, ADMIN_ID_3),
+        )
+        check_equal("Владелец — первый ID из ADMIN_IDS", cfg_multi.admin_id, ADMIN_ID)
+        check("Первый ID распознаётся как администратор", cfg_multi.is_env_admin(ADMIN_ID))
+        check("Второй ID распознаётся как администратор", cfg_multi.is_env_admin(ADMIN_ID_2))
+        check("Посторонний ID не администратор", not cfg_multi.is_env_admin(DB_CLIENT_ID))
+
+        _clear_env()
+        dedup_env = env_dir / "dedup.env"
+        dedup_env.write_text(
+            f"BOT_TOKEN={TEST_TOKEN}\nADMIN_IDS={ADMIN_ID},{ADMIN_ID},{ADMIN_ID_2}\n",
+            encoding="utf-8",
+        )
+        check_equal(
+            "Повторы в ADMIN_IDS убираются, порядок сохраняется",
+            load_config(dedup_env).admin_ids,
+            (ADMIN_ID, ADMIN_ID_2),
+        )
+
+        _clear_env()
+        os.environ["BOT_TOKEN"] = TEST_TOKEN
+        os.environ["ADMIN_IDS"] = f"{ADMIN_ID_2},{ADMIN_ID}"
+        os.environ["ADMIN_ID"] = str(ADMIN_ID)
+        check_equal(
+            "ADMIN_IDS важнее устаревшего ADMIN_ID",
+            load_config(None).admin_ids,
+            (ADMIN_ID_2, ADMIN_ID),
+        )
+
+        _clear_env()
+        bad_multi = env_dir / "bad_multi.env"
+        bad_multi.write_text(
+            f"BOT_TOKEN={TEST_TOKEN}\nADMIN_IDS={ADMIN_ID},@nickname\n", encoding="utf-8"
+        )
+        try:
+            load_config(bad_multi)
+            check("ADMIN_IDS с @nickname должен отклоняться", False, "исключение не поднято")
+        except ConfigError as exc:
+            check(
+                "ADMIN_IDS: понятная ошибка про числовой ID",
+                "числовой" in str(exc) and "ADMIN_IDS" in str(exc),
+            )
+
+        _clear_env()
+        no_admins = env_dir / "no_admins.env"
+        no_admins.write_text(f"BOT_TOKEN={TEST_TOKEN}\n", encoding="utf-8")
+        try:
+            load_config(no_admins)
+            check("Без ADMIN_IDS запуск должен отклоняться", False, "исключение не поднято")
+        except ConfigError as exc:
+            check("Без ADMIN_IDS ошибка объясняет, что вписать", "ADMIN_IDS" in str(exc))
 
         _clear_env()
         bad_tz = env_dir / "bad_tz.env"
@@ -603,6 +702,7 @@ def test_texts() -> None:
             "client_name": "Иван",
             "user_link": "@client",
             "created_at": "23.10.2026 17:51",
+            "admins_count": 2,
         },
         texts.CLIENT_APPROVED: {
             "tariff": "VIP",
@@ -618,6 +718,8 @@ def test_texts() -> None:
             "rejected": 2,
             "users": 8,
             "consented": 8,
+            "admins": 2,
+            "admins_active": 2,
         },
         texts.PENDING_ITEM: {
             "booking_id": 1,
@@ -628,6 +730,70 @@ def test_texts() -> None:
             "created_at": "23.10.2026 17:51",
         },
         texts.ADMIN_ALREADY_PROCESSED: {"booking_id": 1, "status": "подтверждена"},
+        texts.ADMIN_ALREADY_PROCESSED_NOTE: {"status": "подтверждена", "decider": "@admin"},
+        texts.ADMIN_DECISION_APPROVED: {
+            "decided_at": "23.10.2026 17:51",
+            "decided_by": "@admin",
+            "notify_status": "да",
+        },
+        texts.ADMIN_DECISION_REJECTED: {
+            "decided_at": "23.10.2026 17:51",
+            "decided_by": "@admin",
+            "notify_status": "да",
+        },
+        texts.PEER_DECISION_NOTE: {
+            "booking_id": 1,
+            "tariff": "VIP",
+            "time_slot": "Сейчас",
+            "client_name": "Иван",
+            "decision": BookingStatus.decision_title(BookingStatus.APPROVED),
+            "decided_by": "@admin",
+            "decided_at": "23.10.2026 17:51",
+        },
+        texts.ADMIN_PANEL_GREETING: {
+            "club_name": texts.CLUB_NAME,
+            "stats": texts.STATS_TEMPLATE.format(
+                total=10, pending=3, approved=5, rejected=2, users=8, consented=8, admins=2,
+                admins_active=2,
+            ),
+        },
+        texts.ADMIN_START_INFO: {"role": "владелец"},
+        texts.ADMINS_LIST_HEADER: {"total": 3, "active": 2},
+        texts.ADMINS_ITEM: {
+            "index": 1,
+            "user_link": "@admin",
+            "role": "владелец",
+            "state": texts.ADMINS_STATE_ACTIVE,
+        },
+        texts.ADMINS_ITEM_ADDED: {
+            "index": 2,
+            "user_link": "@second",
+            "role": "администратор",
+            "state": texts.ADMINS_STATE_DISABLED,
+            "added_by": "@admin",
+        },
+        texts.ADMIN_ADDED: {"user_link": "@new", "role": "администратор"},
+        texts.ADMIN_ALREADY_EXISTS: {
+            "user_link": "@new",
+            "role": "администратор",
+            "state": texts.ADMINS_STATE_ACTIVE,
+        },
+        texts.ADMIN_NOT_STARTED_WARNING: {"user_link": "@new"},
+        texts.ADMIN_REMOVED: {"user_link": "@new"},
+        texts.ADMIN_DISABLED: {"user_link": "@new"},
+        texts.ADMIN_ENABLED: {"user_link": "@new"},
+        texts.ADMIN_ROLE_PROMOTED: {"user_link": "@new"},
+        texts.ADMIN_ROLE_DEMOTED: {"user_link": "@new"},
+        texts.ADMIN_MANAGE_FORBIDDEN: {"role": "администратор"},
+        texts.ADMIN_ADD_PROMPT: {},
+        texts.ADMIN_ADD_INVALID_ID: {},
+        texts.ADMIN_ADD_CANCELED: {},
+        texts.ADMIN_OWNER_PROTECTED: {},
+        texts.ADMIN_SELF_PROTECTED: {},
+        texts.ADMIN_LAST_OWNER_PROTECTED: {},
+        texts.ADMIN_NOT_ACTIVE: {},
+        texts.ADMIN_NO_ACCESS: {},
+        texts.ADMINS_EMPTY: {},
     }
     for template, payload in samples.items():
         rendered = template.format(**payload)
@@ -646,6 +812,7 @@ def test_texts() -> None:
                 client_name="И",
                 user_link="@user",
                 created_at="23.10.2026 17:51",
+                admins_count=3,
             )
         )
         <= 1024,
@@ -1094,9 +1261,11 @@ async def test_edit_fallback(db: Database, cfg: AppConfig) -> None:
 # --------------------------------------------------------------------------- #
 # 9. Роутеры, фильтры, middleware
 # --------------------------------------------------------------------------- #
-def build_dispatcher(db: Database, cfg: AppConfig) -> Dispatcher:
+def build_dispatcher(
+    db: Database, cfg: AppConfig, admins: AdminRegistry | None = None
+) -> Dispatcher:
     """Собрать диспетчер ровно так, как это делает :mod:`main`."""
-    dispatcher = Dispatcher(storage=MemoryStorage(), db=db, cfg=cfg)
+    dispatcher = Dispatcher(storage=MemoryStorage(), db=db, cfg=cfg, admins=admins)
     dispatcher.include_router(admin_handlers.router)   # админ-панель — первой
     dispatcher.include_router(client_handlers.router)  # клиент — вторым
     return dispatcher
@@ -1323,8 +1492,77 @@ async def test_dispatcher_routing(db: Database, cfg: AppConfig, dispatcher: Disp
     # 7. /admin: доступ только у администратора
     _, sent = await feed(make_message(user_id=user_id, bot=bot, text="/admin"))
     check("feed_update: /admin от клиента не показывает статистику", not any("Всего заявок" in t for t in sent))
+    check(
+        "feed_update: /admin от клиента объясняет отсутствие прав",
+        any("доступна администраторам" in t for t in sent),
+    )
     _, sent = await feed(make_message(user_id=ADMIN_ID, bot=bot, text="/admin", username="admin", first_name="Админ"))
     check("feed_update: /admin администратору показывает статистику", any("Всего заявок" in t for t in sent))
+
+    # 7b. Администратор, добавленный через панель, получает доступ без перезапуска
+    registry: AdminRegistry = dispatcher.workflow_data["admins"]
+    await db.add_admin(ADMIN_ID_2, role=AdminRole.OPERATOR, added_by=ADMIN_ID)
+    registry.remember(ADMIN_ID_2)
+
+    _, sent = await feed(make_message(user_id=user_id, bot=bot, text="/admins"))
+    check("feed_update: /admins от клиента не показывает список", not any("Администраторы клуба" in t for t in sent))
+
+    mark = bot.mark()
+    _, sent = await feed(
+        make_message(user_id=ADMIN_ID_2, bot=bot, text="/admins", username="second_admin", first_name="Второй")
+    )
+    check(
+        "feed_update: добавленный админ видит список администраторов",
+        any("Администраторы клуба" in t for t in sent),
+    )
+    check(
+        "feed_update: оператору объяснено, что управление — у владельца",
+        any("только владелец" in t for t in sent),
+    )
+    operator_payload = bot.new_messages(mark)[0]
+    check(
+        "feed_update: у оператора нет кнопок управления администраторами",
+        not any(
+            b.callback_data and b.callback_data.startswith("ad:admin:")
+            for row in markup_of(operator_payload).inline_keyboard
+            for b in row
+        ),
+    )
+
+    mark = bot.mark()
+    await feed(make_message(user_id=ADMIN_ID, bot=bot, text="/admins", username="admin", first_name="Админ"))
+    owner_payload = bot.new_messages(mark)[0]
+    check(
+        "feed_update: у владельца есть кнопка «➕ Добавить»",
+        any(b.text == "➕ Добавить" for row in markup_of(owner_payload).inline_keyboard for b in row),
+    )
+
+    # Добавление администратора через апдейты: кнопка → ID → запись в базу
+    mark = bot.mark()
+    await feed(make_callback(inline_keyboards.CB_ADMIN_ADD, user_id=ADMIN_ID, bot=bot))
+    check(
+        "feed_update: владелец получил запрос ID нового администратора",
+        any("числовой Telegram ID" in t for t in bot.step_texts(mark)),
+    )
+    _, sent = await feed(
+        make_message(user_id=ADMIN_ID, bot=bot, text=str(ADMIN_ID_3), username="admin", first_name="Админ")
+    )
+    check("feed_update: новый администратор добавлен", await db.get_admin(ADMIN_ID_3) is not None)
+    check("feed_update: после добавления показан обновлённый список", any("Администраторы клуба" in t for t in sent))
+
+    _, sent = await feed(
+        make_message(user_id=ADMIN_ID_3, bot=bot, text="/admin", username="new_admin", first_name="Новый")
+    )
+    check(
+        "feed_update: добавленный через апдейты админ видит статистику",
+        any("Всего заявок" in t for t in sent),
+    )
+
+    # Убираем за собой: дальше эти администраторы проверяются отдельно
+    await db.remove_admin(ADMIN_ID_3)
+    await db.remove_admin(ADMIN_ID_2)
+    registry.forget(ADMIN_ID_3)
+    registry.forget(ADMIN_ID_2)
 
     # 8. Группа: бот молчит (фильтр приватного чата)
     group_message = Message(
@@ -1340,6 +1578,639 @@ async def test_dispatcher_routing(db: Database, cfg: AppConfig, dispatcher: Disp
 
 
 # --------------------------------------------------------------------------- #
+# 11. Несколько администраторов: база, реестр, панель управления
+# --------------------------------------------------------------------------- #
+def _event(user_id: int) -> Any:
+    """Минимальное «событие» для проверки фильтра доступа."""
+    return SimpleNamespace(from_user=SimpleNamespace(id=user_id))
+
+
+async def test_multi_admin(db: Database) -> None:
+    print("\n— Несколько администраторов —")
+    cfg = make_cfg(db.path, admin_ids=(ADMIN_ID, ADMIN_ID_2))
+    admins = AdminRegistry(db, cfg)
+    synced = await admins.startup()
+
+    # --- синхронизация .env с базой ----------------------------------------- #
+    check_equal("ADMIN_IDS из .env синхронизированы с базой", synced, (ADMIN_ID, ADMIN_ID_2))
+    owner = await db.get_admin(ADMIN_ID)
+    second = await db.get_admin(ADMIN_ID_2)
+    check("Первый ID из .env стал владельцем", owner is not None and owner.is_owner)
+    check(
+        "Второй ID из .env стал администратором",
+        second is not None and second.role == AdminRole.OPERATOR,
+    )
+    check("Оба администратора активны", owner.is_active and second.is_active)
+    check_equal("Роль владельца называется по-русски", owner.role_title, "владелец")
+    check_equal("Повторный startup идемпотентен", await admins.startup(), (ADMIN_ID, ADMIN_ID_2))
+    check_equal("В базе два активных администратора", await db.count_admins(), (2, 2))
+    check_equal(
+        "Список активных администраторов из базы",
+        set(await db.active_admin_ids()),
+        {ADMIN_ID, ADMIN_ID_2},
+    )
+
+    # --- доступ ------------------------------------------------------------- #
+    is_admin = IsAdmin()
+    check(
+        "Владелец проходит фильтр доступа",
+        await is_admin(_event(ADMIN_ID), admins=admins, cfg=cfg, db=db),
+    )
+    check(
+        "Второй администратор проходит фильтр доступа",
+        await is_admin(_event(ADMIN_ID_2), admins=admins, cfg=cfg, db=db),
+    )
+    check(
+        "Клиент не проходит фильтр доступа",
+        not await is_admin(_event(DB_CLIENT_ID), admins=admins, cfg=cfg, db=db),
+    )
+    check("Фильтр работает и без реестра (по базе)", await is_admin(_event(ADMIN_ID_2), cfg=cfg, db=db))
+    check("Реестр знает владельца", await admins.is_owner(ADMIN_ID))
+    check("Обычный администратор — не владелец", not await admins.is_owner(ADMIN_ID_2))
+
+    await db.set_admin_active(ADMIN_ID_2, False)
+    admins.forget(ADMIN_ID_2)
+    check(
+        "Отключённый администратор теряет доступ",
+        not await is_admin(_event(ADMIN_ID_2), admins=admins, cfg=cfg, db=db),
+    )
+    check("Отключённого нет в списке активных", ADMIN_ID_2 not in await db.active_admin_ids())
+    await db.set_admin_active(ADMIN_ID_2, True)
+    admins.remember(ADMIN_ID_2)
+    check(
+        "Включённый администратор снова проходит фильтр",
+        await is_admin(_event(ADMIN_ID_2), admins=admins, cfg=cfg, db=db),
+    )
+
+    # --- рассылка заявки всем администраторам -------------------------------- #
+    bot = BotSpy()
+    bot.profiles[ADMIN_ID_2] = SimpleNamespace(
+        id=ADMIN_ID_2, username="second_admin", full_name="Второй"
+    )
+    await db.upsert_user(MULTI_CLIENT_ID, "multi_client", "Мультиклиент")
+    await db.set_consent(MULTI_CLIENT_ID, granted=True)
+    booking = await db.add_booking(
+        MULTI_CLIENT_ID, "VIP", "Сейчас (с 20:00, 23.10.2026)", "Мультиклиент", "AgAC_multi"
+    )
+    client_user = await db.get_user(MULTI_CLIENT_ID)
+
+    check_equal(
+        "Получатели уведомлений берутся из базы",
+        set(await admin_recipients(db, cfg)),
+        {ADMIN_ID, ADMIN_ID_2},
+    )
+    report = await deliver_new_booking(bot, cfg, db, booking, client_user)
+    check("Отчёт рассылки успешный", isinstance(report, DeliveryReport) and report.ok)
+    check_equal(
+        "Заявка доставлена обоим администраторам",
+        set(report.delivered),
+        {ADMIN_ID, ADMIN_ID_2},
+    )
+    check_equal("Ошибок доставки нет", report.failed, ())
+    photos = bot.select("SendPhoto")
+    check_equal("Каждому админу ушла своя копия чека", len(photos), 2)
+    check_equal("Первая копия — владельцу", photos[0].chat_id, ADMIN_ID)
+    check_equal("Вторая копия — второму администратору", photos[1].chat_id, ADMIN_ID_2)
+    check(
+        "В подписи видно число уведомлённых администраторов",
+        "Уведомлено администраторов: <b>2</b>" in text_of(photos[0]),
+    )
+    check("В подписи есть «НОВАЯ БРОНЬ»", "НОВАЯ БРОНЬ" in text_of(photos[0]))
+    check(
+        "У каждой копии свои кнопки решения",
+        all(markup_of(photo) is not None for photo in photos),
+    )
+    for admin_id, message_id in report.notifications:
+        await db.add_notification(booking.id, admin_id, message_id)
+    check_equal("Копии уведомлений сохранены в базе", len(await db.list_notifications(booking.id)), 2)
+
+    # --- решение принимает второй администратор ------------------------------ #
+    peer_message_id = dict(report.notifications)[ADMIN_ID]
+    mark = bot.mark()
+    await admin_handlers.cb_decision(
+        make_callback(
+            inline_keyboards.admin_approve_callback(booking.id),
+            user_id=ADMIN_ID_2,
+            bot=bot,
+            with_photo=True,
+            caption=f"🔔 <b>НОВАЯ БРОНЬ №{booking.id}</b>",
+        ),
+        db,
+        bot,
+        cfg,
+    )
+    decided = await db.get_booking(booking.id)
+    check_equal("Статус после решения второго админа", decided.status, BookingStatus.APPROVED)
+    check_equal("В базе записано, кто подтвердил", decided.decided_by, ADMIN_ID_2)
+    check("В базе записано, когда подтвердили", bool(decided.decided_at))
+
+    client_notes = [
+        payload for payload in bot.new_messages(mark) if getattr(payload, "chat_id", None) == MULTI_CLIENT_ID
+    ]
+    check(
+        "Клиенту ушло уведомление о решении",
+        bool(client_notes) and "бронь подтверждена" in text_of(client_notes[0]),
+    )
+
+    own_edit = [
+        payload for name, payload in bot.since(mark)
+        if name == "EditMessageCaption" and payload.chat_id == ADMIN_ID_2
+    ]
+    check("У принявшего решение подпись обновлена", bool(own_edit))
+    check("В отметке видно «ПОДТВЕРЖДЕНО»", "ПОДТВЕРЖДЕНО" in text_of(own_edit[0]))
+    check("В отметке назван администратор", "@second_admin" in text_of(own_edit[0]))
+    check("Кнопки у принявшего решение убраны", markup_of(own_edit[0]) is None)
+
+    peer_edit = [
+        payload for name, payload in bot.since(mark)
+        if name == "EditMessageCaption" and payload.chat_id == ADMIN_ID
+    ]
+    check("Копия владельца погашена", bool(peer_edit))
+    check_equal(
+        "Погашена именно та копия, что сохранена в базе",
+        peer_edit[0].message_id,
+        peer_message_id,
+    )
+    check("В чужой копии сказано, что заявку обработали", "обработана" in text_of(peer_edit[0]))
+    check("В чужой копии названо действие", "подтвердил" in text_of(peer_edit[0]))
+    check("В чужой копии назван принявший решение", "@second_admin" in text_of(peer_edit[0]))
+    check("В чужой копии убраны кнопки", markup_of(peer_edit[0]) is None)
+    check(
+        "Повторная рассылка решения не трогает принявшего",
+        await sync_peer_admins(bot, db, cfg, decided, exclude=ADMIN_ID_2) == [],
+    )
+
+    # --- гонка: два администратора жмут одновременно ------------------------- #
+    race = await db.add_booking(MULTI_CLIENT_ID, "Double", "На ночь (22:00–08:00)", "Гонщик", "AgAC_race")
+    await db.add_notification(race.id, ADMIN_ID, 5001)
+    await db.add_notification(race.id, ADMIN_ID_2, 5002)
+    race_bot = BotSpy()
+    race_bot.profiles.update(bot.profiles)
+    await asyncio.gather(
+        admin_handlers.cb_decision(
+            make_callback(
+                inline_keyboards.admin_approve_callback(race.id),
+                user_id=ADMIN_ID,
+                bot=race_bot,
+                with_photo=True,
+                caption="🔔",
+            ),
+            db,
+            race_bot,
+            cfg,
+        ),
+        admin_handlers.cb_decision(
+            make_callback(
+                inline_keyboards.admin_reject_callback(race.id),
+                user_id=ADMIN_ID_2,
+                bot=race_bot,
+                with_photo=True,
+                caption="🔔",
+            ),
+            db,
+            race_bot,
+            cfg,
+        ),
+    )
+    final = await db.get_booking(race.id)
+    check(
+        "При одновременном нажатии статус меняется один раз",
+        final.status in (BookingStatus.APPROVED, BookingStatus.REJECTED),
+    )
+    check("Решение записано за одним администратором", final.decided_by in (ADMIN_ID, ADMIN_ID_2))
+    check(
+        "Клиенту при одновременном нажатии ушло одно решение",
+        len([p for p in race_bot.select("SendMessage") if p.chat_id == MULTI_CLIENT_ID]) == 1,
+    )
+    race_alerts = [
+        payload for name, payload in race_bot.calls
+        if name == "AnswerCallbackQuery" and getattr(payload, "show_alert", False)
+    ]
+    check("Проигравший администратор получил alert «уже обработана»", bool(race_alerts))
+    check(
+        "В alert назван тот, кто успел первым",
+        any("Решение принял" in text_of(payload) for payload in race_alerts),
+    )
+
+    # --- панель: список администраторов -------------------------------------- #
+    panel_bot = BotSpy()
+    panel_bot.profiles[ADMIN_ID_3] = SimpleNamespace(
+        id=ADMIN_ID_3, username="new_admin", full_name="Новый"
+    )
+    panel_bot.profiles.update(bot.profiles)
+    mark = panel_bot.mark()
+    await admin_handlers.cmd_admins(
+        make_message(user_id=ADMIN_ID, bot=panel_bot, text="/admins", username="admin", first_name="Админ"),
+        db,
+        panel_bot,
+        cfg,
+    )
+    listed = panel_bot.new_messages(mark)[0]
+    check("Список администраторов отрисован", "Администраторы клуба" in text_of(listed))
+    check("В списке показаны роли", "владелец" in text_of(listed))
+    check("В списке показан статус активности", "🟢 работает" in text_of(listed))
+    check(
+        "Владельцу доступны кнопки управления",
+        any(b.text == "➕ Добавить" for row in markup_of(listed).inline_keyboard for b in row),
+    )
+    check(
+        "Владелец из .env защищён — под ним нет кнопок",
+        not any(
+            b.callback_data and str(ADMIN_ID) in b.callback_data
+            for row in markup_of(listed).inline_keyboard
+            for b in row
+        ),
+    )
+
+    # --- панель: добавление администратора ----------------------------------- #
+    state = make_fsm_context(ADMIN_ID)
+    mark = panel_bot.mark()
+    await admin_handlers.cb_admin_add_start(
+        make_callback(inline_keyboards.CB_ADMIN_ADD, user_id=ADMIN_ID, bot=panel_bot),
+        db,
+        panel_bot,
+        state,
+        admins,
+    )
+    check_equal("Включён режим ожидания ID", await state.get_state(), AdminFSM.waiting_admin_id)
+    check(
+        "Объяснено, какой ID прислать",
+        any("числовой Telegram ID" in t for t in panel_bot.step_texts(mark)),
+    )
+    check(
+        "Под запросом есть кнопка отмены",
+        any(
+            b.callback_data == inline_keyboards.CB_ADMIN_ADD_CANCEL
+            for row in markup_of(panel_bot.step_payloads(mark)[-1]).inline_keyboard
+            for b in row
+        ),
+    )
+
+    mark = panel_bot.mark()
+    await admin_handlers.msg_admin_id(
+        make_message(user_id=ADMIN_ID, bot=panel_bot, text="@nickname"), state, db, panel_bot, cfg, admins
+    )
+    check(
+        "Вместо ID — понятная подсказка",
+        any("не похоже на числовой Telegram ID" in t for t in panel_bot.new_texts(mark)),
+    )
+    check_equal("Режим ввода не сброшен после ошибки", await state.get_state(), AdminFSM.waiting_admin_id)
+    check("Посторонний не добавился в базу", await db.get_admin(ADMIN_ID_3) is None)
+
+    mark = panel_bot.mark()
+    await admin_handlers.msg_admin_id(
+        make_message(user_id=ADMIN_ID, bot=panel_bot, text=str(ADMIN_ID_3)), state, db, panel_bot, cfg, admins
+    )
+    added = await db.get_admin(ADMIN_ID_3)
+    check("Новый администратор записан в базу", added is not None and added.is_active)
+    check_equal("Новый администратор — не владелец", added.role, AdminRole.OPERATOR)
+    check_equal("Записано, кто добавил", added.added_by, ADMIN_ID)
+    check_equal("Режим ввода сброшен", await state.get_state(), None)
+    check("Реестр сразу знает нового администратора", await admins.is_admin(ADMIN_ID_3))
+    check(
+        "Предупредили, что новичку нужно нажать /start",
+        any("/start" in t for t in panel_bot.new_texts(mark)),
+    )
+    check(
+        "После добавления показан обновлённый список",
+        any("Администраторы клуба" in t for t in panel_bot.new_texts(mark)),
+    )
+
+    # --- новый администратор получает доступ --------------------------------- #
+    check(
+        "Добавленный проходит фильтр IsAdmin",
+        await IsAdmin()(_event(ADMIN_ID_3), admins=admins, cfg=cfg, db=db),
+    )
+    mark = panel_bot.mark()
+    await admin_handlers.cmd_admin(
+        make_message(user_id=ADMIN_ID_3, bot=panel_bot, text="/admin", username="new_admin", first_name="Новый"),
+        db,
+    )
+    check("Новому администратору доступна статистика", any("Всего заявок" in t for t in panel_bot.new_texts(mark)))
+
+    # --- права: оператор не управляет списком -------------------------------- #
+    operator_state = make_fsm_context(ADMIN_ID_3)
+    mark = panel_bot.mark()
+    await admin_handlers.cb_admin_add_start(
+        make_callback(inline_keyboards.CB_ADMIN_ADD, user_id=ADMIN_ID_3, bot=panel_bot),
+        db,
+        panel_bot,
+        operator_state,
+        admins,
+    )
+    denies = [payload for name, payload in panel_bot.since(mark) if name == "AnswerCallbackQuery"]
+    check("Оператору запрещено управлять списком", bool(denies) and denies[0].show_alert is True)
+    check("В отказе сказано про владельца", "только владелец" in text_of(denies[0]))
+    check_equal("Режим ввода оператору не включили", await operator_state.get_state(), None)
+
+    mark = panel_bot.mark()
+    await admin_handlers.cmd_admins(
+        make_message(user_id=ADMIN_ID_3, bot=panel_bot, text="/admins", username="new_admin", first_name="Новый"),
+        db,
+        panel_bot,
+        cfg,
+    )
+    operator_view = panel_bot.new_messages(mark)[0]
+    check("Оператор видит список администраторов", "Администраторы клуба" in text_of(operator_view))
+    check("Оператору объяснили отсутствие прав", "только владелец" in text_of(operator_view))
+    check(
+        "У оператора нет кнопок управления",
+        not any(
+            b.callback_data and b.callback_data.startswith("ad:admin:")
+            for row in markup_of(operator_view).inline_keyboard
+            for b in row
+        ),
+    )
+
+    # --- включение/отключение ------------------------------------------------ #
+    mark = panel_bot.mark()
+    await admin_handlers.cb_admin_toggle(
+        make_callback(inline_keyboards.admin_toggle_callback(ADMIN_ID_3), user_id=ADMIN_ID, bot=panel_bot),
+        db,
+        panel_bot,
+        cfg,
+        admins,
+    )
+    check("Администратор отключён кнопкой", not (await db.get_admin(ADMIN_ID_3)).is_active)
+    check("Отключённый потерял доступ", not await admins.is_admin(ADMIN_ID_3))
+    check(
+        "В списке показан статус «отключён»",
+        any("⚪️ отключён" in t for t in panel_bot.step_texts(mark)),
+    )
+    check("Об отключении сообщили", any("отключён" in text_of(p) for p in panel_bot.answers()[-1:]))
+
+    await admin_handlers.cb_admin_toggle(
+        make_callback(inline_keyboards.admin_toggle_callback(ADMIN_ID_3), user_id=ADMIN_ID, bot=panel_bot),
+        db,
+        panel_bot,
+        cfg,
+        admins,
+    )
+    check("Администратор включён обратно", (await db.get_admin(ADMIN_ID_3)).is_active)
+    check("Включённый снова проходит фильтр", await admins.is_admin(ADMIN_ID_3))
+
+    # --- смена роли ---------------------------------------------------------- #
+    await admin_handlers.cb_admin_role(
+        make_callback(inline_keyboards.admin_promote_callback(ADMIN_ID_3), user_id=ADMIN_ID, bot=panel_bot),
+        db,
+        panel_bot,
+        cfg,
+        admins,
+    )
+    check_equal("Роль повышена до владельца", (await db.get_admin(ADMIN_ID_3)).role, AdminRole.OWNER)
+    check("Новый владелец получил право управления", await admins.is_owner(ADMIN_ID_3))
+
+    # --- защиты -------------------------------------------------------------- #
+    mark = panel_bot.mark()
+    await admin_handlers.cb_admin_delete(
+        make_callback(inline_keyboards.admin_delete_callback(ADMIN_ID), user_id=ADMIN_ID, bot=panel_bot),
+        db,
+        panel_bot,
+        cfg,
+        admins,
+    )
+    protect = [payload for name, payload in panel_bot.since(mark) if name == "AnswerCallbackQuery"]
+    check("Владельца из .env нельзя удалить", bool(protect) and "нельзя" in text_of(protect[0]))
+    check("Владелец из .env остался в базе", (await db.get_admin(ADMIN_ID)) is not None)
+
+    mark = panel_bot.mark()
+    await admin_handlers.cb_admin_delete(
+        make_callback(inline_keyboards.admin_delete_callback(ADMIN_ID_3), user_id=ADMIN_ID_3, bot=panel_bot),
+        db,
+        panel_bot,
+        cfg,
+        admins,
+    )
+    self_protect = [payload for name, payload in panel_bot.since(mark) if name == "AnswerCallbackQuery"]
+    check("Себя удалить нельзя", bool(self_protect) and "Себя" in text_of(self_protect[0]))
+    check("Самоудаление не тронуло базу", (await db.get_admin(ADMIN_ID_3)) is not None)
+
+    await db.set_admin_active(ADMIN_ID, False)  # как если бы базу правили вручную
+    admins.forget(ADMIN_ID)
+    mark = panel_bot.mark()
+    await admin_handlers.cb_admin_role(
+        make_callback(inline_keyboards.admin_demote_callback(ADMIN_ID_3), user_id=ADMIN_ID_3, bot=panel_bot),
+        db,
+        panel_bot,
+        cfg,
+        admins,
+    )
+    last_owner = [payload for name, payload in panel_bot.since(mark) if name == "AnswerCallbackQuery"]
+    check(
+        "Последнего активного владельца нельзя понизить",
+        bool(last_owner) and "последнего" in text_of(last_owner[0]),
+    )
+    check_equal("Роль последнего владельца не изменилась", (await db.get_admin(ADMIN_ID_3)).role, AdminRole.OWNER)
+    await db.set_admin_active(ADMIN_ID, True)
+    admins.remember(ADMIN_ID)
+
+    await admin_handlers.cb_admin_role(
+        make_callback(inline_keyboards.admin_demote_callback(ADMIN_ID_3), user_id=ADMIN_ID, bot=panel_bot),
+        db,
+        panel_bot,
+        cfg,
+        admins,
+    )
+    check_equal("Роль понижена, когда владельцев двое", (await db.get_admin(ADMIN_ID_3)).role, AdminRole.OPERATOR)
+
+    # --- отмена ввода ID ----------------------------------------------------- #
+    cancel_state = make_fsm_context(ADMIN_ID)
+    await cancel_state.set_state(AdminFSM.waiting_admin_id)
+    mark = panel_bot.mark()
+    await admin_handlers.cb_admin_add_cancel(
+        make_callback(inline_keyboards.CB_ADMIN_ADD_CANCEL, user_id=ADMIN_ID, bot=panel_bot),
+        cancel_state,
+        panel_bot,
+    )
+    check_equal("Отмена сбрасывает режим ввода", await cancel_state.get_state(), None)
+    check("Об отмене сообщили", any("отменено" in t for t in panel_bot.step_texts(mark)))
+
+    # --- удаление ------------------------------------------------------------ #
+    mark = panel_bot.mark()
+    await admin_handlers.cb_admin_delete(
+        make_callback(inline_keyboards.admin_delete_callback(ADMIN_ID_3), user_id=ADMIN_ID, bot=panel_bot),
+        db,
+        panel_bot,
+        cfg,
+        admins,
+    )
+    check("Администратор удалён из базы", (await db.get_admin(ADMIN_ID_3)) is None)
+    check("Удалённый потерял доступ", not await admins.is_admin(ADMIN_ID_3))
+    check("Об удалении сообщили", any("удалён" in text_of(p) for p in panel_bot.answers()[-1:]))
+
+    # --- статистика и приветствие -------------------------------------------- #
+    stats = await db.get_stats()
+    check("Статистика считает администраторов", stats.admins == 2 and stats.admins_active == 2)
+    mark = panel_bot.mark()
+    await admin_handlers.cmd_admin(
+        make_message(user_id=ADMIN_ID, bot=panel_bot, text="/admin", username="admin", first_name="Админ"),
+        db,
+    )
+    panel_payload = panel_bot.new_messages(mark)[0]
+    check("В статистике панели видно администраторов", "Администраторов" in text_of(panel_payload))
+    check(
+        "В панели есть кнопка «👥 Администраторы»",
+        any(b.text == "👥 Администраторы" for row in markup_of(panel_payload).inline_keyboard for b in row),
+    )
+
+    mark = panel_bot.mark()
+    admin_state = make_fsm_context(ADMIN_ID_2)
+    await db.upsert_user(ADMIN_ID_2, "second_admin", "Второй")
+    await db.set_consent(ADMIN_ID_2, granted=True)
+    await client_handlers.cmd_start(
+        make_message(user_id=ADMIN_ID_2, bot=panel_bot, text="/start", username="second_admin", first_name="Второй"),
+        admin_state,
+        db,
+        cfg,
+        admins,
+    )
+    greeting = panel_bot.new_texts(mark)
+    check(
+        "Администратору /start показывает служебную подсказку",
+        any("Вы администратор этого бота" in t for t in greeting),
+    )
+    check("В подсказке названа роль", any("администратор" in t for t in greeting))
+    check("В подсказке упомянута команда /admins", any("/admins" in t for t in greeting))
+
+    mark = panel_bot.mark()
+    client_state = make_fsm_context(MULTI_CLIENT_ID)
+    await client_handlers.cmd_start(
+        make_message(
+            user_id=MULTI_CLIENT_ID,
+            bot=panel_bot,
+            text="/start",
+            username="multi_client",
+            first_name="Мультиклиент",
+        ),
+        client_state,
+        db,
+        cfg,
+        admins,
+    )
+    check(
+        "Клиенту служебная подсказка администратора не показывается",
+        not any("Вы администратор этого бота" in t for t in panel_bot.new_texts(mark)),
+    )
+
+    # --- команды панели без прав --------------------------------------------- #
+    mark = panel_bot.mark()
+    await client_handlers.cmd_admin_no_access(
+        make_message(
+            user_id=MULTI_CLIENT_ID,
+            bot=panel_bot,
+            text="/admin",
+            username="multi_client",
+            first_name="Мультиклиент",
+        ),
+        db,
+    )
+    check(
+        "Клиенту на /admin объясняют, что команда для администраторов",
+        any("доступна администраторам" in t for t in panel_bot.new_texts(mark)),
+    )
+
+    await db.set_admin_active(ADMIN_ID_2, False)
+    mark = panel_bot.mark()
+    await client_handlers.cmd_admin_no_access(
+        make_message(
+            user_id=ADMIN_ID_2, bot=panel_bot, text="/admin", username="second_admin", first_name="Второй"
+        ),
+        db,
+    )
+    check(
+        "Отключённому администратору сообщают об отключении",
+        any("отключена владельцем" in t for t in panel_bot.new_texts(mark)),
+    )
+    await db.set_admin_active(ADMIN_ID_2, True)
+    admins.remember(ADMIN_ID_2)
+
+    for context in (state, operator_state, cancel_state, admin_state, client_state):
+        await context.storage.close()
+
+
+# --------------------------------------------------------------------------- #
+# 12. Обновление базы, созданной предыдущей версией бота
+# --------------------------------------------------------------------------- #
+OLD_SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (
+    user_id       INTEGER PRIMARY KEY,
+    username      TEXT,
+    first_name    TEXT,
+    consent_given BOOLEAN NOT NULL DEFAULT 0,
+    created_at    DATETIME
+);
+CREATE TABLE IF NOT EXISTS bookings (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         INTEGER NOT NULL REFERENCES users (user_id) ON DELETE CASCADE,
+    tariff          TEXT    NOT NULL,
+    time_slot       TEXT    NOT NULL,
+    client_name     TEXT    NOT NULL,
+    receipt_file_id TEXT,
+    status          TEXT    NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'approved', 'rejected')),
+    created_at      DATETIME
+);
+CREATE INDEX IF NOT EXISTS idx_bookings_status ON bookings (status, id);
+"""
+
+
+async def test_migration() -> None:
+    print("\n— Обновление старой базы данных —")
+    workdir = Path(tempfile.mkdtemp(prefix="admiral-migrate-"))
+    old_path = workdir / "old.db"
+    db = Database(old_path, timezone=TEST_TZ)
+    try:
+        connection = sqlite3.connect(old_path)
+        try:
+            connection.executescript(OLD_SCHEMA)
+            connection.execute(
+                "INSERT INTO users (user_id, username, first_name, consent_given, created_at) "
+                "VALUES (1, 'old_client', 'Старый', 1, '2026-01-01T10:00:00+11:00')"
+            )
+            connection.execute(
+                "INSERT INTO bookings (user_id, tariff, time_slot, client_name, receipt_file_id, "
+                "status, created_at) VALUES (1, 'VIP', 'Сейчас (с 10:00)', 'Старый', 'AgAC_old', "
+                "'pending', '2026-01-01T10:05:00+11:00')"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        await db.connect()
+        tables = await db.list_tables()
+        check("В старую базу добавлена таблица admins", "admins" in tables)
+        check("В старую базу добавлена таблица booking_notifications", "booking_notifications" in tables)
+        check("Старые таблицы сохранены", {"users", "bookings"} <= set(tables))
+
+        booking = await db.get_booking(1)
+        check(
+            "Старая заявка читается после миграции",
+            booking is not None and booking.client_name == "Старый",
+        )
+        check(
+            "Новые столбцы у старой заявки пустые",
+            booking.decided_by is None and booking.decided_at is None,
+        )
+        check("Старые данные не потеряны", (await db.get_stats()).users == 1)
+
+        check(
+            "Статус старой заявки меняется и пишет, кто решил",
+            await db.set_status_if_pending(1, BookingStatus.APPROVED, decided_by=42),
+        )
+        updated = await db.get_booking(1)
+        check_equal("Кто принял решение — записан", updated.decided_by, 42)
+        check("Когда принято решение — записано", bool(updated.decided_at))
+        stats = await db.get_stats()
+        check(
+            "Статистика старой базы считается",
+            stats.total == 1 and stats.approved == 1 and stats.admins == 0,
+        )
+    finally:
+        await db.close()
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------- #
 # Запуск
 # --------------------------------------------------------------------------- #
 async def run_all() -> int:
@@ -1352,6 +2223,8 @@ async def run_all() -> int:
         test_config()
 
         db = await init_database(db_path, TEST_TZ)
+        # Как в main.py: администраторы из .env попадают в таблицу admins.
+        await AdminRegistry(db, cfg).startup()
         await test_database(db)
 
         # Повторное подключение не должно ломать существующую базу.
@@ -1365,13 +2238,17 @@ async def run_all() -> int:
         await test_full_scenario(db, cfg, SCENARIO_CLIENT_ID)
         await test_cancel_and_outdated(db, cfg)
         await test_edit_fallback(db, cfg)
-        dispatcher = build_dispatcher(db, cfg)
+        admins = AdminRegistry(db, cfg)
+        await admins.startup()
+        dispatcher = build_dispatcher(db, cfg, admins)
         await test_wiring(db, cfg, dispatcher)
         await test_dispatcher_routing(db, cfg, dispatcher)
         await dispatcher.storage.close()
+
+        await test_multi_admin(db)
+        await test_migration()
     finally:
-        if db is not None:
-            await db.close()
+        await db.close()
         shutil.rmtree(workdir, ignore_errors=True)
 
     failed = [name for name, ok, _ in _results if not ok]
