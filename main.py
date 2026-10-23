@@ -136,9 +136,19 @@ async def run_polling(cfg: AppConfig) -> None:
         logger.info("Владелец бота (первый ADMIN_IDS): id=%s", cfg.admin_id)
         logger.info("База данных: %s", db.path)
         logger.info("Часовой пояс клуба: %s", cfg.timezone)
+        club = cfg.club
+        logger.info("Клуб: %s, %s — %s, работает %s", club.name, club.city, club.address, club.hours)
         logger.info(
-            "Прайс и правила клуба настраиваются в файле bot/texts.py "
-            "(константы TARIFFS, CLUB_*, ADMIN_*)."
+            "Администратор: %s, телефон %s; предоплата: %s %s (%s)",
+            club.admin_name,
+            club.admin_phone,
+            club.payment_system,
+            club.payment_card,
+            club.payment_holder,
+        )
+        logger.info(
+            "Цены и правила — в bot/texts.py (TARIFFS); контакты клуба меняются "
+            "через .env (CLUB_*, ADMIN_NAME, ADMIN_PHONE, PAYMENT_*)."
         )
         await _setup_bot_commands(bot, admin_ids)
 

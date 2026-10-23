@@ -7,8 +7,12 @@
 Форматы ``callback_data`` (лимит Telegram — 64 байта, соблюдаются):
 
 * ``consent:give``        — согласие на обработку ПДн (152-ФЗ);
+* ``consent:revoke``      — запрос отзыва согласия (152-ФЗ, ч. 2 ст. 9);
+* ``consent:revoke:yes``  — подтвердить отзыв согласия;
+* ``consent:revoke:no``   — отменить отзыв согласия;
 * ``bk:t:<tariff_key>``   — выбор тарифа (standart / vip / svip / double);
-* ``bk:w:<time_key>``     — выбор времени (now / night / other);
+* ``bk:w:<time_key>``     — выбор времени (now / morning / day / night / other);
+* ``bk:pay:<way>``        — способ оплаты (``check`` — прислать чек, ``spot`` — на месте);
 * ``bk:cancel``           — отмена бронирования;
 * ``ad:stats``            — статистика админ-панели;
 * ``ad:list:<page>``      — страница списка активных броней;
@@ -33,10 +37,28 @@ from bot.texts import TARIFFS, TIME_CHOICES, tariff_button_label
 # --- идентификаторы callback_data -------------------------------------------
 
 CB_CONSENT_GIVE: str = "consent:give"
+CB_CONSENT_REVOKE: str = "consent:revoke"
+CB_CONSENT_REVOKE_YES: str = "consent:revoke:yes"
+CB_CONSENT_REVOKE_NO: str = "consent:revoke:no"
+
+#: Все callback-и, связанные с согласием на обработку ПДн.
+CONSENT_CALLBACKS: tuple[str, ...] = (
+    CB_CONSENT_GIVE,
+    CB_CONSENT_REVOKE,
+    CB_CONSENT_REVOKE_YES,
+    CB_CONSENT_REVOKE_NO,
+)
 
 CB_TARIFF_PREFIX: str = "bk:t:"
 CB_TIME_PREFIX: str = "bk:w:"
+CB_PAY_PREFIX: str = "bk:pay:"
+CB_PAY_CHECK: str = "bk:pay:check"
+CB_PAY_SPOT: str = "bk:pay:spot"
 CB_BOOKING_CANCEL: str = "bk:cancel"
+
+#: Способы оплаты на шаге 4.
+PAY_WAY_CHECK: str = "check"
+PAY_WAY_SPOT: str = "spot"
 
 CB_ADMIN_STATS: str = "ad:stats"
 CB_ADMIN_LIST_PREFIX: str = "ad:list:"
@@ -56,6 +78,7 @@ CB_ADMIN_DELETE_PREFIX: str = "ad:admin:del:"
 BOOKING_CALLBACK_PREFIXES: tuple[str, ...] = (
     CB_TARIFF_PREFIX,
     CB_TIME_PREFIX,
+    CB_PAY_PREFIX,
     CB_BOOKING_CANCEL,
 )
 
@@ -135,6 +158,14 @@ def parse_time_key(data: str | None) -> str | None:
     return key if any(choice_key == key for choice_key, _ in TIME_CHOICES) else None
 
 
+def parse_payment_way(data: str | None) -> str | None:
+    """Вернуть способ оплаты из ``callback_data`` (``check`` / ``spot``) или ``None``."""
+    if not data or not data.startswith(CB_PAY_PREFIX):
+        return None
+    way = data[len(CB_PAY_PREFIX) :]
+    return way if way in (PAY_WAY_CHECK, PAY_WAY_SPOT) else None
+
+
 def parse_admin_decision(data: str | None) -> tuple[str, int] | None:
     """Разобрать кнопку решения: вернуть ``(статус, id брони)`` или ``None``."""
     if not data:
@@ -203,6 +234,45 @@ def consent_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="✅ Я согласен", callback_data=CB_CONSENT_GIVE)],
         ]
     )
+
+
+def privacy_keyboard() -> InlineKeyboardMarkup:
+    """Раздел /privacy: кнопка отзыва согласия на обработку ПДн."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🚫 Отозвать согласие", callback_data=CB_CONSENT_REVOKE)],
+        ]
+    )
+
+
+def revoke_confirm_keyboard() -> InlineKeyboardMarkup:
+    """Подтверждение отзыва согласия: бот перестанет работать для пользователя."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Да, отозвать", callback_data=CB_CONSENT_REVOKE_YES),
+                InlineKeyboardButton(text="↩️ Отмена", callback_data=CB_CONSENT_REVOKE_NO),
+            ],
+        ]
+    )
+
+
+def payment_choice_keyboard(prepayment_required: bool) -> InlineKeyboardMarkup:
+    """Шаг 4: как оплатить — прислать чек или заплатить на месте.
+
+    Если клуб требует полную предоплату (ночной пакет в ПТ–ВС), кнопка
+    «Оплачу на месте» не показывается: иначе клиент выбрал бы вариант,
+    противоречащий правилам.
+    """
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text="📸 Оплатил — отправить чек", callback_data=CB_PAY_CHECK)],
+    ]
+    if not prepayment_required:
+        rows.append(
+            [InlineKeyboardButton(text="💵 Оплачу на месте", callback_data=CB_PAY_SPOT)]
+        )
+    rows.append([_cancel_button()])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _cancel_button() -> InlineKeyboardButton:
@@ -377,6 +447,19 @@ def pending_list_keyboard(
 
 
 __all__ = [
+    "CB_CONSENT_REVOKE",
+    "CB_CONSENT_REVOKE_NO",
+    "CB_CONSENT_REVOKE_YES",
+    "CB_PAY_CHECK",
+    "CB_PAY_PREFIX",
+    "CB_PAY_SPOT",
+    "CONSENT_CALLBACKS",
+    "PAY_WAY_CHECK",
+    "PAY_WAY_SPOT",
+    "parse_payment_way",
+    "payment_choice_keyboard",
+    "privacy_keyboard",
+    "revoke_confirm_keyboard",
     "ADMIN_CALLBACK_PREFIXES",
     "BOOKING_CALLBACK_PREFIXES",
     "CANCEL_BUTTON_TEXT",
