@@ -2,6 +2,6 @@
 # Установка:  pip install -r requirements.txt
 # Версии, на которых проект проверен, указаны в комментариях.
 
-aiogram>=3.13,<4.0            # проверено на 3.31.0 — фреймворк бота (Router, FSM, HTML)
-aiosqlite>=0.20.0,<1.0.0      # проверено на 0.22.1 — асинхронный доступ к SQLite
-python-dotenv>=1.0.1,<2.0.0   # проверено на 1.2.4 — чтение настроек из .env
+aiogram
+aiosqlite
+python-dotenv
