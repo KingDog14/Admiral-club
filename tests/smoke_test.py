@@ -601,21 +601,35 @@ def test_booking_logic() -> None:
 # --------------------------------------------------------------------------- #
 def test_keyboards() -> None:
     print("\n— Клавиатуры —")
-    menu = reply_keyboards.main_menu()
-    buttons = [button.text for row in menu.keyboard for button in row]
-    check_equal("Главное меню: 5 кнопок", len(buttons), 5)
-    check_equal(
-        "Состав главного меню",
-        buttons,
-        [
-            reply_keyboards.MENU_PRICE,
-            reply_keyboards.MENU_RULES,
-            reply_keyboards.MENU_BOOKING,
-            reply_keyboards.MENU_FAQ,
-            reply_keyboards.MENU_CONTACTS,
-        ],
+    from bot.ui.screens import Screen, ScreenCB, faq_list_keyboard, menu_keyboard, nav
+
+    guest_menu = menu_keyboard(is_admin=False)
+    guest_buttons = [b.text for row in guest_menu.inline_keyboard for b in row]
+    check_equal("Главное меню гостя: 6 inline-кнопок", len(guest_buttons), 6)
+    check(
+        "У гостя нет кнопки «🛠 Админ-панель»",
+        all("Админ-панель" not in t for t in guest_buttons),
     )
-    check("Меню уменьшенное (resize_keyboard)", menu.resize_keyboard is True)
+    admin_menu = menu_keyboard(is_admin=True)
+    admin_buttons = [b.text for row in admin_menu.inline_keyboard for b in row]
+    check_equal("Главное меню администратора: 7 inline-кнопок", len(admin_buttons), 7)
+    check("У администратора есть кнопка «🛠 Админ-панель»", "🛠 Админ-панель" in admin_buttons)
+
+    faq_kb = faq_list_keyboard()
+    faq_buttons = [b for row in faq_kb.inline_keyboard for b in row]
+    check_equal("В FAQ по кнопке на каждый вопрос + Назад/В меню", len(faq_buttons), len(texts.FAQ_ITEMS) + 2)
+    check(
+        "Первый вопрос FAQ распаковывается через ScreenCB",
+        ScreenCB.unpack(faq_buttons[0].callback_data).screen == Screen.FAQ_ITEM,
+    )
+    check(
+        "Под FAQ есть «◀ Назад» и «🏠 В меню»",
+        [b.text for b in faq_kb.inline_keyboard[-1]] == ["◀ Назад", "🏠 В меню"],
+    )
+
+    legacy_menu = reply_keyboards.main_menu()
+    check("Запасное reply-меню уменьшенное (resize_keyboard)", legacy_menu.resize_keyboard is True)
+    _ = nav
 
     consent = inline_keyboards.consent_keyboard()
     check_equal("Экран согласия: одна кнопка", len(consent.inline_keyboard[0]), 1)
@@ -699,6 +713,9 @@ def test_keyboards() -> None:
     check("Навигация по страницам: назад, вперёд, статистика", len(pending.inline_keyboard[-1]) == 3)
 
     named_keyboards = {
+        "меню гостя": guest_menu,
+        "меню администратора": admin_menu,
+        "FAQ": faq_kb,
         "согласие": consent,
         "/privacy": privacy,
         "подтверждение отзыва": revoke,
@@ -1058,13 +1075,36 @@ def test_texts() -> None:
     )
 
 
+    for faq_item in texts.FAQ_ITEMS:
+        rendered_faq = texts.faq_answer(faq_item, club)
+        check(
+            f"FAQ[{faq_item.key}]: ответ отрендерился без плейсхолдеров",
+            "{" not in rendered_faq and len(rendered_faq) <= 4096,
+        )
+    check(
+        "В HUD-шаблонах не осталось незакрытых плейсхолдеров",
+        "{" not in texts.render(texts.SCREEN_MENU_BODY, club)
+        and "{"
+        not in texts.render(
+            texts.SCREEN_PRICES_BODY,
+            club,
+            morning_slot=texts.MORNING_SLOT,
+            day_slot=texts.DAY_SLOT,
+            night_slot=texts.NIGHT_SLOT,
+        ),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # 6. Сквозной сценарий: клиент → админ
 # --------------------------------------------------------------------------- #
 async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> None:
+    from bot.ui.screens import Screen, ScreenCB, nav
+
     print("\n— Сквозной сценарий (клиент → админ) —")
     bot = BotSpy()
     state = make_fsm_context(client_id)
+    admin_state = make_fsm_context(ADMIN_ID)
 
     # --- /start без согласия ------------------------------------------------ #
     mark = bot.mark()
@@ -1078,21 +1118,23 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
         getattr(consent_markup, "inline_keyboard", None) is not None
         and consent_markup.inline_keyboard[0][0].text == "✅ Я согласен",
     )
-    check("Без согласия меню не выдаётся", "Прайс-лист" not in "".join(sent))
+    check("Без согласия меню не выдаётся", "ГЛАВНОЕ МЕНЮ" not in "".join(sent))
 
-    # --- кнопка «Я согласен» ------------------------------------------------ #
+    # --- кнопка «Я согласен» — то же сообщение превращается в экран меню --- #
     mark = bot.mark()
     consent_callback = make_callback(inline_keyboards.CB_CONSENT_GIVE, user_id=client_id, bot=bot)
-    await client_handlers.cb_consent_give(consent_callback, state, db, bot, cfg)
+    await client_handlers.cb_consent_give(consent_callback, state, db, cfg)
     check("После кнопки согласие записано в базу", (await db.has_consent(client_id)) is True)
     edits = [p for n, p in bot.since(mark) if n == "EditMessageText"]
-    check("Сообщение с согласием заменено подтверждением", edits and "Согласие" in text_of(edits[0]))
-    greeting_payload = [p for n, p in bot.since(mark) if n == "SendMessage"][-1]
-    check("После согласия показано приветствие", "Здравствуйте" in text_of(greeting_payload))
     check(
-        "Вместе с приветствием выдано reply-меню из 5 кнопок",
-        len([b for row in markup_of(greeting_payload).keyboard for b in row]) == 5,
+        "Сообщение согласия перезаписано без нового сообщения (edit, не send)",
+        bool(edits) and not [p for n, p in bot.since(mark) if n == "SendMessage"],
     )
+    menu_text = text_of(edits[0])
+    check("На экране подтверждено согласие и открыто меню", "Согласие" in menu_text and "ГЛАВНОЕ МЕНЮ" in menu_text)
+    check("На экране моноширинная HUD-рамка клуба", "┌" in menu_text and "ADMIRAL" in menu_text)
+    menu_btns = [b.text for row in markup_of(edits[0]).inline_keyboard for b in row]
+    check("В меню гостя 6 inline-кнопок без админки", len(menu_btns) == 6 and "🛠 Админ-панель" not in menu_btns)
     check("Тост о фиксации согласия отправлен", any("Согласие зафиксировано" in text_of(p) for p in bot.answers()))
 
     # --- повторный /start уже с согласием ----------------------------------- #
@@ -1100,39 +1142,57 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
     await client_handlers.cmd_start(
         make_message(user_id=client_id, bot=bot, text="/start"), state, db, cfg
     )
-    check("После согласия /start открывает меню", any("Меню" in t or "Здравствуйте" in t for t in bot.new_texts(mark)))
+    check("После согласия /start открывает экран меню", any("ГЛАВНОЕ МЕНЮ" in t for t in bot.step_texts(mark)))
 
-    # --- шаг 1: тариф ------------------------------------------------------- #
+    # --- шаг 1: вход в мастер по inline-кнопке «🎮 Забронировать» ----------- #
     mark = bot.mark()
-    await client_handlers.msg_start_booking(
-        make_message(user_id=client_id, bot=bot, text=reply_keyboards.MENU_BOOKING), state
+    await client_handlers.cb_navigate(
+        make_callback(nav(Screen.BOOK_TARIFF), user_id=client_id, bot=bot),
+        ScreenCB(screen=Screen.BOOK_TARIFF, arg=""),
+        state,
+        db,
+        cfg,
     )
     check_equal("Шаг 1: состояние выбора тарифа", await state.get_state(), BookingFSM.choosing_tariff.state)
-    tariff_message = bot.new_messages(mark)[0]
-    check("Шаг 1 показывает тарифы", "Standart" in text_of(tariff_message) and "S VIP" in text_of(tariff_message))
-    check(
-        "Шаг 1 содержит inline-кнопки тарифов",
-        len(markup_of(tariff_message).inline_keyboard) == 5,
-    )
+    tariff_payload = bot.step_payloads(mark)[-1]
+    check("Шаг 1 нарисован правкой того же сообщения", any(n == "EditMessageText" for n, _ in bot.since(mark)))
+    check("Шаг 1 показывает залы", "Standart" in text_of(tariff_payload) and "S VIP" in text_of(tariff_payload))
+    tariff_btns = [b for row in markup_of(tariff_payload).inline_keyboard for b in row]
+    check("Шаг 1 содержит 4 зала + Назад + Отменить", len(tariff_btns) == 6)
 
     mark = bot.mark()
     await client_handlers.cb_choose_tariff(
         make_callback(inline_keyboards.tariff_callback("svip"), user_id=client_id, bot=bot),
         state,
-        bot,
+        db,
         cfg,
     )
     check_equal("Шаг 2: состояние выбора времени", await state.get_state(), BookingFSM.choosing_time.state)
     check_equal("Тариф сохранён в FSM", (await state.get_data()).get(DATA_TARIFF_KEY), "svip")
     edited = [p for n, p in bot.since(mark) if n == "EditMessageText"]
-    check("Сообщение шага 1 заменено шагом 2", edited and "шаг 2 из 4" in text_of(edited[0]))
-    check("Шаг 2 показывает выбранное время клуба", "Сейчас в клубе" in text_of(edited[0]))
+    check("Сообщение шага 1 заменено шагом 2", edited and "ШАГ 2/4" in text_of(edited[0]))
+    check("Шаг 2 показывает текущее время клуба", "Сейчас в клубе" in text_of(edited[0]))
+
+    # --- «‹ Шаг назад» возвращает на шаг 1, затем снова выбираем зал -------- #
+    await client_handlers.cb_booking_back(
+        make_callback(inline_keyboards.CB_BOOKING_BACK, user_id=client_id, bot=bot),
+        state,
+        db,
+        cfg,
+    )
+    check_equal("«Шаг назад» вернул на выбор зала", await state.get_state(), BookingFSM.choosing_tariff.state)
+    await client_handlers.cb_choose_tariff(
+        make_callback(inline_keyboards.tariff_callback("svip"), user_id=client_id, bot=bot),
+        state,
+        db,
+        cfg,
+    )
 
     # --- шаг 2: «Другое» → время текстом ------------------------------------ #
     await client_handlers.cb_choose_time(
         make_callback(inline_keyboards.time_callback("other"), user_id=client_id, bot=bot),
         state,
-        bot,
+        db,
         cfg,
     )
     check_equal(
@@ -1143,9 +1203,16 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
 
     mark = bot.mark()
     await client_handlers.msg_enter_custom_time(
-        make_message(user_id=client_id, bot=bot, text="когда-нибудь потом"), state
+        make_message(user_id=client_id, bot=bot, text="когда-нибудь потом"), state, db, cfg
     )
-    check("Время без цифр отклоняется подсказкой", bot.new_texts(mark) == [texts.INVALID_CUSTOM_TIME])
+    check(
+        "Время без цифр отклоняется подсказкой на том же экране",
+        any(texts.INVALID_CUSTOM_TIME in t for t in bot.step_texts(mark)),
+    )
+    check(
+        "Сообщение клиента с ошибкой удалено, чтобы не засорять чат",
+        any(n == "DeleteMessage" for n, _ in bot.since(mark)),
+    )
     check_equal(
         "После ошибки состояние не сбрасывается",
         await state.get_state(),
@@ -1153,30 +1220,26 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
     )
 
     await client_handlers.msg_enter_custom_time(
-        make_message(user_id=client_id, bot=bot, text="сегодня в 18:30 на 3 часа"), state
+        make_message(user_id=client_id, bot=bot, text="сегодня в 18:30 на 3 часа"), state, db, cfg
     )
     check_equal("Шаг 3: состояние ввода имени", await state.get_state(), BookingFSM.entering_name.state)
     check_equal("Своё время сохранено", (await state.get_data()).get(DATA_TIME_SLOT), "сегодня в 18:30 на 3 часа")
 
-    # --- кнопка меню во время сценария не ломает его ------------------------- #
     mark = bot.mark()
     await client_handlers.msg_enter_name(
-        make_message(user_id=client_id, bot=bot, text=reply_keyboards.MENU_PRICE), state, cfg
+        make_message(user_id=client_id, bot=bot, text="http://spam"), state, db, cfg
     )
-    check("Кнопка меню во время сценария даёт подсказку", any("оформляем бронь" in t for t in bot.new_texts(mark)))
+    check("Некорректное имя отклоняется", any(texts.INVALID_NAME in t for t in bot.step_texts(mark)))
     check_equal("Сценарий не прерывается", await state.get_state(), BookingFSM.entering_name.state)
-
-    mark = bot.mark()
-    await client_handlers.msg_enter_name(
-        make_message(user_id=client_id, bot=bot, text="http://spam"), state, cfg
-    )
-    check("Некорректное имя отклоняется", bot.new_texts(mark) == [texts.INVALID_NAME])
 
     # --- шаг 3: имя → шаг 4 (способ оплаты) --------------------------------- #
     mark = bot.mark()
-    await client_handlers.msg_enter_name(make_message(user_id=client_id, bot=bot, text="тимур"), state, cfg)
+    await client_handlers.msg_enter_name(
+        make_message(user_id=client_id, bot=bot, text="тимур"), state, db, cfg
+    )
     check_equal("Шаг 4: выбор способа оплаты", await state.get_state(), BookingFSM.choosing_payment.state)
-    payment_text = bot.new_texts(mark)[0]
+    payment_payload = bot.step_payloads(mark)[-1]
+    payment_text = text_of(payment_payload)
     check(
         "На шаге оплаты показаны реквизиты Сбербанк + номер",
         "Сбербанк" in payment_text and cfg.club.payment_card in payment_text,
@@ -1185,47 +1248,47 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
     check("Имя нормализовано до «Тимур»", "Тимур" in payment_text)
     check("Тариф подставлен в шаг оплаты", "S VIP" in payment_text)
     check("Для будней и своего времени предоплата не требуется", "на месте" in payment_text)
-    pay_markup = markup_of(bot.new_messages(mark)[0])
-    pay_buttons = [b for row in pay_markup.inline_keyboard for b in row]
+    pay_buttons = [b for row in markup_of(payment_payload).inline_keyboard for b in row]
     check(
-        "Доступны оба способа: чек и «на месте»",
-        len(pay_buttons) == 3
+        "Доступны оба способа + Шаг назад + Отменить",
+        len(pay_buttons) == 4
         and any("чек" in b.text for b in pay_buttons)
-        and any("на месте" in b.text for b in pay_buttons),
+        and any("на месте" in b.text for b in pay_buttons)
+        and any("Шаг назад" in b.text for b in pay_buttons),
     )
 
     # --- шаг 4: клиент выбирает «оплатил — отправить чек» -------------------- #
     mark = bot.mark()
     await client_handlers.cb_choose_payment(
-        make_callback(inline_keyboards.CB_PAY_CHECK, user_id=client_id, bot=bot), state, db, bot, cfg
+        make_callback(inline_keyboards.CB_PAY_CHECK, user_id=client_id, bot=bot), state, db, cfg
     )
     check_equal("Шаг 4б: ожидание фото чека", await state.get_state(), BookingFSM.waiting_receipt.state)
     waiting_text = " ".join(bot.step_texts(mark))
-    check("После выбора чека бот ждёт ФОТО чека", "ФОТО" in waiting_text or "фото" in waiting_text)
+    check("После выбора чека бот ждёт ФОТО чека", "ФОТО" in waiting_text)
     check("В ожидании чека повторены реквизиты", cfg.club.payment_card in waiting_text)
 
     # --- текст вместо фото --------------------------------------------------- #
     mark = bot.mark()
     await client_handlers.msg_receipt_expected(
-        make_message(user_id=client_id, bot=bot, text="я оплатил"), cfg
+        make_message(user_id=client_id, bot=bot, text="я оплатил"), state, db, cfg
     )
     check(
-        "Текст вместо фото — просьба прислать именно фото",
-        any("именно" in t and "ФОТО" in t for t in bot.new_texts(mark)),
+        "Текст вместо фото — просьба прислать именно фото на том же экране",
+        any("именно" in t and "ФОТО" in t for t in bot.step_texts(mark)),
     )
 
     # --- шаг 4: фото чека ---------------------------------------------------- #
     mark = bot.mark()
     await client_handlers.msg_receive_receipt(
-        make_message(user_id=client_id, bot=bot, with_photo=True), state, db, bot, cfg
+        make_message(user_id=client_id, bot=bot, with_photo=True), state, db, cfg
     )
     check("FSM очищен после создания заявки", (await state.get_state()) is None)
-    client_reply = bot.new_texts(mark)[0]
-    check("Клиенту: «Чек получен! Ожидайте подтверждения»", "Чек получен" in client_reply)
-    check(
-        "Клиенту вернули главное меню",
-        "Прайс-лист" not in client_reply and markup_of(bot.new_messages(mark)[0]) is not None,
-    )
+    done_payload = [p for p in bot.step_payloads(mark) if getattr(p, "chat_id", None) == client_id][-1]
+    client_reply = text_of(done_payload)
+    check("Клиенту показан экран «ЗАЯВКА ОТПРАВЛЕНА»", "ЗАЯВКА ОТПРАВЛЕНА" in client_reply)
+    check("На экране подтверждён приём чека", "чек отправлен" in client_reply)
+    done_btns = [b.text for row in markup_of(done_payload).inline_keyboard for b in row]
+    check("Под экраном есть «📋 Мои брони» и «🏠 В меню»", "📋 Мои брони" in done_btns and "🏠 В меню" in done_btns)
 
     admin_photos = [p for n, p in bot.since(mark) if n == "SendPhoto"]
     check("Админу отправлено одно фото чека", len(admin_photos) == 1)
@@ -1256,18 +1319,19 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
     # --- админ: список активных броней --------------------------------------- #
     mark = bot.mark()
     await admin_handlers.cb_pending_list(
-        make_callback(inline_keyboards.admin_list_callback(0), user_id=ADMIN_ID, bot=bot), db, bot, cfg
+        make_callback(inline_keyboards.admin_list_callback(0), user_id=ADMIN_ID, bot=bot),
+        admin_state,
+        db,
+        cfg,
     )
     edits = [p for n, p in bot.since(mark) if n in ("EditMessageText", "SendMessage")]
     list_text = text_of(edits[-1])
-    pending_total = await db.count_bookings(BookingStatus.PENDING)
-    check("Список активных броней отрисован", "Активные брони" in list_text)
-    check("В списке видны номера заявок", "#" in list_text)
-    check("Счётчик в заголовке совпадает с базой", f"ожидают решения): {pending_total}" in list_text)
+    check("Список активных броней отрисован", "АКТИВНЫЕ БРОНИ" in list_text)
+    check("В списке видны номера заявок", "№" in list_text)
     check("На странице не больше 5 заявок", list_text.count("👤") <= 5)
     check(
-        "У каждой заявки в списке есть кнопки решения",
-        len(markup_of(edits[-1]).inline_keyboard) >= 2,
+        "У каждой заявки в списке есть кнопки решения и Назад/В меню",
+        len(markup_of(edits[-1]).inline_keyboard) >= 3,
     )
 
     # --- админ: подтверждение брони ------------------------------------------ #
@@ -1280,6 +1344,7 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
             with_photo=True,
             caption=f"🔔 <b>НОВАЯ БРОНЬ №{target.id}</b>",
         ),
+        admin_state,
         db,
         bot,
         cfg,
@@ -1312,6 +1377,7 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
             with_photo=True,
             caption=f"🔔 <b>НОВАЯ БРОНЬ №{target.id}</b>\n\n✅ <b>ПОДТВЕРЖДЕНО</b>",
         ),
+        admin_state,
         db,
         bot,
         cfg,
@@ -1331,6 +1397,7 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
     mark = bot.mark()
     await admin_handlers.cb_decision(
         make_callback(inline_keyboards.admin_reject_callback(other_booking.id), user_id=ADMIN_ID, bot=bot),
+        admin_state,
         db,
         bot,
         cfg,
@@ -1348,149 +1415,191 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
         any(n == "EditMessageText" for n, _ in bot.since(mark)),
     )
 
-    # --- админ: /admin со статистикой ---------------------------------------- #
+    # --- админ: панель сводки (и кнопкой меню, и /admin) --------------------- #
     mark = bot.mark()
     await admin_handlers.cmd_admin(
         make_message(user_id=ADMIN_ID, bot=bot, text="/admin", username="admin", first_name="Админ"),
+        admin_state,
         db,
         cfg,
     )
-    stats_payload = bot.new_messages(mark)[0]
+    stats_payload = bot.step_payloads(mark)[-1]
     stats_text = text_of(stats_payload)
-    check("Статистика содержит «Всего заявок»", "Всего заявок" in stats_text)
+    check("Статистика содержит «Заявок всего»", "Заявок всего" in stats_text)
     check("Статистика содержит «Ожидают»", "Ожидают" in stats_text)
-    check("Статистика содержит «Подтверждено»", "Подтверждено" in stats_text)
+    check("Статистика содержит «Одобрено»", "Одобрено" in stats_text)
     check("Статистика содержит «Отклонено»", "Отклонено" in stats_text)
-    check("Статистика показывает число пользователей", "Пользователей в базе" in stats_text)
+    check("Статистика показывает число клиентов", "Клиентов" in stats_text)
     check(
-        "Панель содержит кнопку «📋 Активные брони»",
-        any(b.text == "📋 Активные брони" for row in markup_of(stats_payload).inline_keyboard for b in row),
+        "Панель содержит кнопку «📋 Активные брони» и «◀ Назад»",
+        any(b.text == "📋 Активные брони" for row in markup_of(stats_payload).inline_keyboard for b in row)
+        and any(b.text == "◀ Назад" for row in markup_of(stats_payload).inline_keyboard for b in row),
     )
 
     mark = bot.mark()
     await admin_handlers.cb_refresh_stats(
-        make_callback(inline_keyboards.CB_ADMIN_STATS, user_id=ADMIN_ID, bot=bot), db, bot, cfg
+        make_callback(inline_keyboards.CB_ADMIN_STATS, user_id=ADMIN_ID, bot=bot),
+        admin_state,
+        db,
+        cfg,
     )
     check("Кнопка обновления статистики работает", any(n == "EditMessageText" for n, _ in bot.since(mark)))
 
     await state.storage.close()
+    await admin_state.storage.close()
 
 
 # --------------------------------------------------------------------------- #
-# 7. Отмена и протухшие кнопки
+# 7. Отмена, навигация «Назад» и протухшие кнопки
 # --------------------------------------------------------------------------- #
 async def test_cancel_and_outdated(db: Database, cfg: AppConfig) -> None:
-    print("\n— Отмена и устаревшие кнопки —")
+    from bot.ui.screens import SCREEN_BACK, Screen, ScreenCB, nav
+
+    print("\n— Отмена, стек «Назад» и разделы —")
     bot = BotSpy()
     state = make_fsm_context(CANCEL_CLIENT_ID)
     await state.set_state(BookingFSM.entering_name)
 
     mark = bot.mark()
     await client_handlers.cmd_cancel(
-        make_message(user_id=CANCEL_CLIENT_ID, bot=bot, text="/cancel"), state
+        make_message(user_id=CANCEL_CLIENT_ID, bot=bot, text="/cancel"), state, db, cfg
     )
     check("После /cancel состояние сброшено", (await state.get_state()) is None)
-    check("Клиенту сообщено об отмене", bot.new_texts(mark) == [texts.BOOKING_CANCELED])
+    cancel_payload = bot.step_payloads(mark)[-1]
+    check("Клиенту сообщено об отмене и показано меню", texts.BOOKING_CANCELED in text_of(cancel_payload))
     check(
-        "После отмены вернули reply-меню",
-        markup_of(bot.new_messages(mark)[0]).keyboard[0][0].text == reply_keyboards.MENU_PRICE,
+        "После отмены показаны inline-кнопки главного меню",
+        markup_of(cancel_payload).inline_keyboard[0][0].text == "🖥 Залы и цены",
     )
 
     mark = bot.mark()
     await client_handlers.cmd_cancel(
-        make_message(user_id=CANCEL_CLIENT_ID, bot=bot, text="/cancel"), state
+        make_message(user_id=CANCEL_CLIENT_ID, bot=bot, text="/cancel"), state, db, cfg
     )
     check(
-        "/cancel без активного бронирования отвечает корректно",
-        bot.new_texts(mark) == [texts.BOOKING_NOT_STARTED],
+        "/cancel без активного бронирования отвечает на том же экране",
+        any(texts.BOOKING_NOT_STARTED in t for t in bot.step_texts(mark))
+        and any(n == "EditMessageText" for n, _ in bot.since(mark)),
     )
 
+    await state.set_state(BookingFSM.choosing_time)
     mark = bot.mark()
     await client_handlers.cb_cancel_booking(
-        make_callback(inline_keyboards.CB_BOOKING_CANCEL, user_id=CANCEL_CLIENT_ID, bot=bot), state, bot
+        make_callback(inline_keyboards.CB_BOOKING_CANCEL, user_id=CANCEL_CLIENT_ID, bot=bot),
+        state,
+        db,
+        cfg,
     )
-    check("Кнопка «Отменить» удаляет сообщение с кнопками", any(n == "DeleteMessage" for n, _ in bot.since(mark)))
+    check("Кнопка «Отменить» перерисовывает экран в меню", any(n == "EditMessageText" for n, _ in bot.since(mark)))
     check("После кнопки отмены состояние сброшено", (await state.get_state()) is None)
 
-    await state.set_state(BookingFSM.choosing_tariff)
     mark = bot.mark()
     outdated = make_callback(inline_keyboards.tariff_callback("vip"), user_id=CANCEL_CLIENT_ID, bot=bot)
     await client_handlers.cb_booking_outdated(outdated)
     alerts = [p for n, p in bot.since(mark) if n == "AnswerCallbackQuery"]
     check("Протухшая кнопка бронирования даёт alert", alerts and alerts[0].show_alert is True)
-    await state.clear()
 
     mark = bot.mark()
     await client_handlers.msg_photo_without_booking(
-        make_message(user_id=CANCEL_CLIENT_ID, bot=bot, with_photo=True), state
+        make_message(user_id=CANCEL_CLIENT_ID, bot=bot, with_photo=True), state, db, cfg
     )
-    check("Фото вне бронирования объясняет, что делать", bot.new_texts(mark) == [texts.PHOTO_WITHOUT_BOOKING])
+    check(
+        "Фото вне бронирования объясняет, что делать",
+        any(texts.PHOTO_WITHOUT_BOOKING in t for t in bot.step_texts(mark)),
+    )
 
     # Фото, присланное посреди сценария, не должно обрывать бронирование
     await state.set_state(BookingFSM.entering_name)
     mark = bot.mark()
     await client_handlers.msg_photo_without_booking(
-        make_message(user_id=CANCEL_CLIENT_ID, bot=bot, with_photo=True), state
+        make_message(user_id=CANCEL_CLIENT_ID, bot=bot, with_photo=True), state, db, cfg
     )
-    check("Фото на шаге ввода имени даёт подсказку про имя", "указать имя" in bot.new_texts(mark)[0])
+    check("Фото на шаге ввода имени даёт подсказку про имя", any("указать имя" in t for t in bot.step_texts(mark)))
     check_equal("Сценарий при этом продолжается", await state.get_state(), BookingFSM.entering_name.state)
-    await state.clear()
+    await state.set_state(None)
 
     mark = bot.mark()
-    await client_handlers.msg_unknown(make_message(user_id=CANCEL_CLIENT_ID, bot=bot, text="что-то странное"))
-    check("Непонятное сообщение получает подсказку про меню", bot.new_texts(mark) == [texts.UNKNOWN_MESSAGE])
-
-    mark = bot.mark()
-    await client_handlers.msg_price_list(
-        make_message(user_id=CANCEL_CLIENT_ID, bot=bot, text=reply_keyboards.MENU_PRICE), cfg
+    await client_handlers.msg_unknown(
+        make_message(user_id=CANCEL_CLIENT_ID, bot=bot, text="что-то странное"), state, db, cfg
     )
-    price_text = bot.new_texts(mark)[0]
-    check("Прайс-лист отправляется клиенту", "ПРАЙС-ЛИСТ" in price_text and "STANDART" in price_text)
-
-    mark = bot.mark()
-    await client_handlers.msg_rules(
-        make_message(user_id=CANCEL_CLIENT_ID, bot=bot, text=reply_keyboards.MENU_RULES), cfg
-    )
-    check("Правила отправляются клиенту", "ПРАВИЛА КЛУБА" in bot.new_texts(mark)[0])
-
-    mark = bot.mark()
-    await client_handlers.msg_faq(
-        make_message(user_id=CANCEL_CLIENT_ID, bot=bot, text=reply_keyboards.MENU_FAQ), cfg
-    )
-    faq_text = bot.new_texts(mark)[0]
-    check("Частые вопросы отправляются клиенту", "ЧАСТЫЕ ВОПРОСЫ" in faq_text)
-    check("В FAQ есть про ночь и предоплату", "22:00" in faq_text and "ПТ–ВС" in faq_text)
-
-    mark = bot.mark()
-    await client_handlers.msg_contacts(
-        make_message(user_id=CANCEL_CLIENT_ID, bot=bot, text=reply_keyboards.MENU_CONTACTS), cfg
-    )
-    contacts_calls = [p for n, p in bot.since(mark) if n in ("SendMessage", "SendContact")]
-    check("Контакты: текст + карточка контакта", len(contacts_calls) == 2)
-    check("В контактах телефон клуба", cfg.club.admin_phone in text_of(contacts_calls[0]))
-    check("В контактах адрес клуба", cfg.club.address in text_of(contacts_calls[0]))
     check(
-        "Карточка контакта содержит номер",
-        getattr(contacts_calls[1], "phone_number", "") == cfg.club.admin_phone_raw,
+        "Непонятное сообщение получает подсказку над меню",
+        any(texts.UNKNOWN_MESSAGE in t for t in bot.step_texts(mark)),
+    )
+
+    # --- переходы между экранами правят ОДНО сообщение, «Назад» помнит путь - #
+    async def go(screen: str, arg: str = "") -> str:
+        m = bot.mark()
+        await client_handlers.cb_navigate(
+            make_callback(nav(screen, arg), user_id=CANCEL_CLIENT_ID, bot=bot),
+            ScreenCB(screen=screen, arg=arg),
+            state,
+            db,
+            cfg,
+        )
+        assert not [p for n, p in bot.since(m) if n == "SendMessage"], "лишний SendMessage при навигации"
+        return bot.step_texts(m)[-1]
+
+    price_text = await go(Screen.PRICES)
+    check("Экран «Залы и цены» показывает оба прейскуранта", "ЗАЛЫ И ЦЕНЫ" in price_text and "Standart" in price_text)
+
+    faq_list = await go(Screen.FAQ)
+    check("Экран FAQ — список вопросов, а не простыня", "ЧАСТЫЕ ВОПРОСЫ" in faq_list and "Выберите вопрос" in faq_list)
+
+    faq_night = await go(Screen.FAQ_ITEM, "night")
+    check("Кнопка вопроса открывает ответ в том же сообщении", "22:00–08:00" in faq_night)
+
+    faq_scam = await go(Screen.FAQ_ITEM, "scam")
+    check("В ответе про мошенников назван единый номер", cfg.club.payment_card in faq_scam)
+
+    # Возврат по стеку: faq_item(scam) → faq_item(night) → faq → prices → menu
+    back1 = await go(SCREEN_BACK)
+    check("«Назад» вернул на предыдущий вопрос FAQ", "22:00–08:00" in back1)
+    back2 = await go(SCREEN_BACK)
+    check("Ещё раз «Назад» — к списку вопросов", "Выберите вопрос" in back2)
+    back3 = await go(SCREEN_BACK)
+    check("Ещё раз «Назад» — к ценам, откуда пришли", "ЗАЛЫ И ЦЕНЫ" in back3)
+
+    rules_text = await go(Screen.RULES)
+    check("Правила открываются экраном", "ПРАВИЛА КЛУБА" in rules_text)
+
+    contacts_text = await go(Screen.CONTACTS)
+    check(
+        "В контактах кликабельный телефон и адрес",
+        cfg.club.admin_phone in contacts_text and cfg.club.address in contacts_text,
+    )
+
+    bookings_text = await go(Screen.BOOKINGS)
+    check("Раздел «Мои брони» отрисован", "МОИ БРОНИ" in bookings_text)
+
+    # Старый текст reply-кнопки (у клиента могла остаться старая клавиатура)
+    mark = bot.mark()
+    await client_handlers.msg_unknown(
+        make_message(user_id=CANCEL_CLIENT_ID, bot=bot, text=reply_keyboards.MENU_PRICE), state, db, cfg
+    )
+    check(
+        "Старая reply-кнопка по-прежнему открывает нужный экран",
+        any("ЗАЛЫ И ЦЕНЫ" in t for t in bot.step_texts(mark)),
     )
 
     mark = bot.mark()
-    await client_handlers.cmd_privacy(make_message(user_id=CANCEL_CLIENT_ID, bot=bot, text="/privacy"), cfg)
-    privacy_text = bot.new_texts(mark)[0]
+    await client_handlers.cmd_privacy(
+        make_message(user_id=CANCEL_CLIENT_ID, bot=bot, text="/privacy"), state, db, cfg
+    )
+    privacy_payload = bot.step_payloads(mark)[-1]
+    privacy_text = text_of(privacy_payload)
     check("Команда /privacy показывает политику ПДн", "152-ФЗ" in privacy_text)
+    privacy_btns = [b for row in markup_of(privacy_payload).inline_keyboard for b in row]
     check(
-        "В /privacy есть кнопка отзыва согласия",
-        any(
-            b.callback_data == inline_keyboards.CB_CONSENT_REVOKE
-            for row in markup_of(bot.new_messages(mark)[0]).inline_keyboard
-            for b in row
-        ),
+        "В /privacy есть кнопка отзыва согласия и «◀ Назад»",
+        any(b.callback_data == inline_keyboards.CB_CONSENT_REVOKE for b in privacy_btns)
+        and any(b.text == "◀ Назад" for b in privacy_btns),
     )
 
     # --- отзыв согласия: бот перестаёт работать ----------------------------- #
     mark = bot.mark()
     await client_handlers.cb_consent_revoke(
-        make_callback(inline_keyboards.CB_CONSENT_REVOKE, user_id=CANCEL_CLIENT_ID, bot=bot), bot
+        make_callback(inline_keyboards.CB_CONSENT_REVOKE, user_id=CANCEL_CLIENT_ID, bot=bot)
     )
     check(
         "Отзыв согласия требует подтверждения",
@@ -1506,7 +1615,6 @@ async def test_cancel_and_outdated(db: Database, cfg: AppConfig) -> None:
         make_callback(inline_keyboards.CB_CONSENT_REVOKE_YES, user_id=CANCEL_CLIENT_ID, bot=bot),
         state,
         db,
-        bot,
         cfg,
     )
     revoked_text = " ".join(bot.step_texts(mark))
@@ -1527,14 +1635,15 @@ async def test_cancel_and_outdated(db: Database, cfg: AppConfig) -> None:
         make_callback(inline_keyboards.CB_CONSENT_GIVE, user_id=CANCEL_CLIENT_ID, bot=bot),
         state,
         db,
-        bot,
         cfg,
     )
     check("Согласие можно вернуть той же кнопкой", (await db.has_consent(CANCEL_CLIENT_ID)) is True)
 
     mark = bot.mark()
-    await client_handlers.cmd_help(make_message(user_id=CANCEL_CLIENT_ID, bot=bot, text="/help"), cfg)
-    check("Команда /help показывает справку", "Как пользоваться ботом" in bot.new_texts(mark)[0])
+    await client_handlers.cmd_help(
+        make_message(user_id=CANCEL_CLIENT_ID, bot=bot, text="/help"), state, db, cfg
+    )
+    check("Команда /help показывает справку", any("Как пользоваться ботом" in t for t in bot.step_texts(mark)))
 
     await state.storage.close()
 
@@ -1554,36 +1663,47 @@ class NoEditBot(BotSpy):
 
 
 async def test_edit_fallback(db: Database, cfg: AppConfig) -> None:
+    from bot.ui.screens import Screen, ScreenCB, nav
+
     print("\n— Отказоустойчивость правки сообщений —")
     bot = NoEditBot()
     state = make_fsm_context(CANCEL_CLIENT_ID + 1)
+    admin_state = make_fsm_context(ADMIN_ID)
 
-    await client_handlers.msg_start_booking(
-        make_message(user_id=CANCEL_CLIENT_ID + 1, bot=bot, text=reply_keyboards.MENU_BOOKING), state
+    await client_handlers.cb_navigate(
+        make_callback(nav(Screen.BOOK_TARIFF), user_id=CANCEL_CLIENT_ID + 1, bot=bot),
+        ScreenCB(screen=Screen.BOOK_TARIFF, arg=""),
+        state,
+        db,
+        cfg,
     )
     mark = bot.mark()
     await client_handlers.cb_choose_tariff(
         make_callback(inline_keyboards.tariff_callback("vip"), user_id=CANCEL_CLIENT_ID + 1, bot=bot),
         state,
-        bot,
+        db,
         cfg,
     )
     check(
         "Если правка не удалась, шаг 2 отправляется новым сообщением",
-        any("шаг 2 из 4" in text for text in bot.new_texts(mark)),
+        any("ШАГ 2/4" in text for text in bot.new_texts(mark)),
     )
     check_equal("Сценарий при этом не сбивается", await state.get_state(), BookingFSM.choosing_time.state)
 
     mark = bot.mark()
     await admin_handlers.cb_pending_list(
-        make_callback(inline_keyboards.admin_list_callback(0), user_id=ADMIN_ID, bot=bot), db, bot, cfg
+        make_callback(inline_keyboards.admin_list_callback(0), user_id=ADMIN_ID, bot=bot),
+        admin_state,
+        db,
+        cfg,
     )
     check(
         "Список заявок админа тоже уходит новым сообщением при отказе правки",
-        any("Активные брони" in text or "Активных броней нет" in text for text in bot.new_texts(mark)),
+        any("АКТИВНЫЕ БРОНИ" in text for text in bot.new_texts(mark)),
     )
     await state.clear()
     await state.storage.close()
+    await admin_state.storage.close()
 
 
 # --------------------------------------------------------------------------- #
@@ -1612,8 +1732,8 @@ async def test_wiring(db: Database, cfg: AppConfig, dispatcher: Dispatcher) -> N
 
     client_message_handlers = len(client_handlers.router.message.handlers)
     client_callback_handlers = len(client_handlers.router.callback_query.handlers)
-    check("Клиентские хендлеры сообщений зарегистрированы", client_message_handlers >= 12, str(client_message_handlers))
-    check("Клиентские хендлеры кнопок зарегистрированы", client_callback_handlers >= 4, str(client_callback_handlers))
+    check("Клиентские хендлеры сообщений зарегистрированы", client_message_handlers >= 8, str(client_message_handlers))
+    check("Клиентские хендлеры кнопок зарегистрированы", client_callback_handlers >= 6, str(client_callback_handlers))
     check("Админские хендлеры сообщений зарегистрированы", len(admin_handlers.router.message.handlers) >= 1)
     check("Админские хендлеры кнопок зарегистрированы", len(admin_handlers.router.callback_query.handlers) >= 3)
 
@@ -1755,40 +1875,52 @@ async def test_dispatcher_routing(db: Database, cfg: AppConfig, dispatcher: Disp
         result = await dispatcher.feed_update(bot, make_update(counter, event))
         return result, bot.step_texts(mark)
 
+    from bot.ui.screens import Screen, nav
+
     # 1. /start от нового пользователя → согласие 152-ФЗ
     _, sent = await feed(make_message(user_id=user_id, bot=bot, text="/start"))
     check("feed_update: /start показывает согласие 152-ФЗ", any("152-ФЗ" in t for t in sent))
-    check("feed_update: до согласия меню не выдаётся", not any("Прайс-лист" in t for t in sent))
+    check("feed_update: до согласия меню не выдаётся", not any("ГЛАВНОЕ МЕНЮ" in t for t in sent))
 
-    # 2. Кнопка меню без согласия → блокировка middleware
-    _, sent = await feed(make_message(user_id=user_id, bot=bot, text=reply_keyboards.MENU_PRICE))
-    check("feed_update: без согласия меню заблокировано", any("152-ФЗ" in t for t in sent))
-    check("feed_update: прайс без согласия не показан", not any("ПРАЙС-ЛИСТ" in t for t in sent))
+    # 2. Кнопка без согласия → блокировка middleware
+    _, sent = await feed(make_callback(nav(Screen.PRICES), user_id=user_id, bot=bot))
+    check("feed_update: прайс без согласия не показан", not any("ЗАЛЫ И ЦЕНЫ" in t for t in sent))
 
     # 3. Согласие через callback
     await feed(make_callback(inline_keyboards.CB_CONSENT_GIVE, user_id=user_id, bot=bot))
     check("feed_update: после кнопки согласие в базе", (await db.has_consent(user_id)) is True)
 
-    # 4. Меню работает
-    _, sent = await feed(make_message(user_id=user_id, bot=bot, text=reply_keyboards.MENU_PRICE))
-    check("feed_update: с согласием прайс отправляется", any("ПРАЙС-ЛИСТ" in t for t in sent))
+    # 4. Inline-навигация работает: цены и FAQ правят то же сообщение
+    _, sent = await feed(make_callback(nav(Screen.PRICES), user_id=user_id, bot=bot))
+    check("feed_update: с согласием прайс открывается", any("ЗАЛЫ И ЦЕНЫ" in t for t in sent))
+
+    _, sent = await feed(make_callback(nav(Screen.FAQ), user_id=user_id, bot=bot))
+    check("feed_update: открыт список вопросов FAQ", any("ЧАСТЫЕ ВОПРОСЫ" in t for t in sent))
+    _, sent = await feed(make_callback(nav(Screen.FAQ_ITEM, "faceit"), user_id=user_id, bot=bot))
+    check("feed_update: открыт ответ вопроса FAQ", any("FACEIT" in t for t in sent))
+
+    # 4b. Попытка открыть админ-панель без прав через nav:admin блокируется
+    mark = bot.mark()
+    await feed(make_callback(nav(Screen.ADMIN), user_id=user_id, bot=bot))
+    check(
+        "feed_update: nav:admin без прав блокируется alert'ом",
+        any(getattr(p, "show_alert", False) for n, p in bot.since(mark) if n == "AnswerCallbackQuery"),
+    )
 
     # 5. Полный сценарий бронирования через апдейты (FSM общий между ними)
-    _, sent = await feed(make_message(user_id=user_id, bot=bot, text=reply_keyboards.MENU_BOOKING))
-    check("feed_update: старт бронирования показывает тарифы", any("Standart" in t for t in sent))
+    _, sent = await feed(make_callback(nav(Screen.BOOK_TARIFF), user_id=user_id, bot=bot))
+    check("feed_update: старт бронирования показывает залы", any("Standart" in t for t in sent))
 
     _, sent = await feed(make_callback(inline_keyboards.tariff_callback("double"), user_id=user_id, bot=bot))
-    check("feed_update: шаг 2 — выбор времени", any("шаг 2 из 4" in t for t in sent))
+    check("feed_update: шаг 2 — выбор времени", any("ШАГ 2/4" in t for t in sent))
 
     _, sent = await feed(make_callback(inline_keyboards.time_callback("night"), user_id=user_id, bot=bot))
-    check("feed_update: шаг 3 — ввод имени", any("шаг 3 из 4" in t for t in sent))
+    check("feed_update: шаг 3 — ввод имени", any("ШАГ 3/4" in t for t in sent))
     check("feed_update: ночной тариф подставлен в шаг", any("22:00–08:00" in t for t in sent))
 
     today = datetime.now(cfg.timezone).date()
-    # Ночь в ПТ–ВС (или в любой день) — клиент выбирает способ оплаты; в выходные
-    # клуб требует полную предоплату, поэтому кнопки «на месте» быть не должно.
     _, sent = await feed(make_message(user_id=user_id, bot=bot, text="алексей"))
-    check("feed_update: шаг 4 — выбор способа оплаты", any("шаг 4 из 4" in t for t in sent))
+    check("feed_update: шаг 4 — выбор способа оплаты", any("ШАГ 4/4" in t for t in sent))
     check("feed_update: имя нормализовано", any("Алексей" in t for t in sent))
     check("feed_update: на шаге оплаты названа сумма", any("К оплате" in t for t in sent))
     if texts.prepayment_required("night", today):
@@ -1797,13 +1929,13 @@ async def test_dispatcher_routing(db: Database, cfg: AppConfig, dispatcher: Disp
         check("feed_update: ночь в будни — можно платить на месте", any("на месте" in t for t in sent))
 
     _, sent = await feed(make_callback(inline_keyboards.CB_PAY_CHECK, user_id=user_id, bot=bot))
-    check("feed_update: после выбора чека бот ждёт фото", any("фото" in t.lower() for t in sent))
+    check("feed_update: после выбора чека бот ждёт фото", any("ФОТО" in t for t in sent))
 
     _, sent = await feed(make_message(user_id=user_id, bot=bot, text="а где реквизиты?"))
     check("feed_update: текст вместо чека — просьба прислать фото", any("именно" in t for t in sent))
 
     _, sent = await feed(make_message(user_id=user_id, bot=bot, with_photo=True))
-    check("feed_update: чек принят", any("Чек получен" in t for t in sent))
+    check("feed_update: чек принят", any("ЗАЯВКА ОТПРАВЛЕНА" in t for t in sent))
     admin_photos = [p for n, p in bot.calls if n == "SendPhoto" and getattr(p, "chat_id", None) == ADMIN_ID]
     check("feed_update: чек ушёл администратору", bool(admin_photos))
 
@@ -1828,15 +1960,20 @@ async def test_dispatcher_routing(db: Database, cfg: AppConfig, dispatcher: Disp
     ]
     check("feed_update: клиенту ушло подтверждение", any("бронь подтверждена" in text_of(p) for p in client_notify))
 
-    # 7. /admin: доступ только у администратора
+    # 7. Админ-панель: кнопкой из меню у админа и отказ клиенту
+    await db.upsert_user(ADMIN_ID, "admin", "Админ")
+    await db.set_consent(ADMIN_ID, granted=True)
+    _, sent = await feed(make_message(user_id=ADMIN_ID, bot=bot, text="/start", username="admin", first_name="Админ"))
+    check("feed_update: /start у админа открывает меню", any("ГЛАВНОЕ МЕНЮ" in t for t in sent))
+    _, sent = await feed(make_callback(nav(Screen.ADMIN), user_id=ADMIN_ID, bot=bot))
+    check("feed_update: кнопка «Админ-панель» открывает сводку", any("Заявок всего" in t for t in sent))
+
     _, sent = await feed(make_message(user_id=user_id, bot=bot, text="/admin"))
-    check("feed_update: /admin от клиента не показывает статистику", not any("Всего заявок" in t for t in sent))
+    check("feed_update: /admin от клиента не показывает статистику", not any("Заявок всего" in t for t in sent))
     check(
         "feed_update: /admin от клиента объясняет отсутствие прав",
         any("только для администраторов" in t for t in sent),
     )
-    _, sent = await feed(make_message(user_id=ADMIN_ID, bot=bot, text="/admin", username="admin", first_name="Админ"))
-    check("feed_update: /admin администратору показывает статистику", any("Всего заявок" in t for t in sent))
 
     # 7b. Администратор, добавленный через панель, получает доступ без перезапуска
     registry: AdminRegistry = dispatcher.workflow_data["admins"]
@@ -1844,7 +1981,7 @@ async def test_dispatcher_routing(db: Database, cfg: AppConfig, dispatcher: Disp
     registry.remember(ADMIN_ID_2)
 
     _, sent = await feed(make_message(user_id=user_id, bot=bot, text="/admins"))
-    check("feed_update: /admins от клиента не показывает список", not any("Администраторы бота" in t for t in sent))
+    check("feed_update: /admins от клиента не показывает список", not any("АДМИНИСТРАТОРЫ" in t for t in sent))
 
     mark = bot.mark()
     _, sent = await feed(
@@ -1852,25 +1989,22 @@ async def test_dispatcher_routing(db: Database, cfg: AppConfig, dispatcher: Disp
     )
     check(
         "feed_update: добавленный админ видит список администраторов",
-        any("Администраторы бота" in t for t in sent),
+        any("АДМИНИСТРАТОРЫ" in t for t in sent),
     )
     check(
         "feed_update: оператору объяснено, что управление — у владельца",
         any("только владелец" in t for t in sent),
     )
-    operator_payload = bot.new_messages(mark)[0]
+    operator_payload = bot.step_payloads(mark)[-1]
+    operator_btns = [b for row in markup_of(operator_payload).inline_keyboard for b in row]
     check(
-        "feed_update: у оператора нет кнопок управления администраторами",
-        not any(
-            b.callback_data and b.callback_data.startswith("ad:admin:")
-            for row in markup_of(operator_payload).inline_keyboard
-            for b in row
-        ),
+        "feed_update: у оператора нет кнопки «➕ Добавить»",
+        not any(b.callback_data == inline_keyboards.CB_ADMIN_ADD for b in operator_btns),
     )
 
     mark = bot.mark()
     await feed(make_message(user_id=ADMIN_ID, bot=bot, text="/admins", username="admin", first_name="Админ"))
-    owner_payload = bot.new_messages(mark)[0]
+    owner_payload = bot.step_payloads(mark)[-1]
     check(
         "feed_update: у владельца есть кнопка «➕ Добавить»",
         any(b.text == "➕ Добавить" for row in markup_of(owner_payload).inline_keyboard for b in row),
@@ -1887,14 +2021,14 @@ async def test_dispatcher_routing(db: Database, cfg: AppConfig, dispatcher: Disp
         make_message(user_id=ADMIN_ID, bot=bot, text=str(ADMIN_ID_3), username="admin", first_name="Админ")
     )
     check("feed_update: новый администратор добавлен", await db.get_admin(ADMIN_ID_3) is not None)
-    check("feed_update: после добавления показан обновлённый список", any("Администраторы бота" in t for t in sent))
+    check("feed_update: после добавления показан обновлённый список", any("АДМИНИСТРАТОРЫ" in t for t in sent))
 
     _, sent = await feed(
         make_message(user_id=ADMIN_ID_3, bot=bot, text="/admin", username="new_admin", first_name="Новый")
     )
     check(
         "feed_update: добавленный через апдейты админ видит статистику",
-        any("Всего заявок" in t for t in sent),
+        any("Заявок всего" in t for t in sent),
     )
 
     # Убираем за собой: дальше эти администраторы проверяются отдельно
@@ -2024,6 +2158,7 @@ async def test_multi_admin(db: Database) -> None:
     check_equal("Копии уведомлений сохранены в базе", len(await db.list_notifications(booking.id)), 2)
 
     # --- решение принимает второй администратор ------------------------------ #
+    admin2_state = make_fsm_context(ADMIN_ID_2)
     peer_message_id = dict(report.notifications)[ADMIN_ID]
     mark = bot.mark()
     await admin_handlers.cb_decision(
@@ -2034,6 +2169,7 @@ async def test_multi_admin(db: Database) -> None:
             with_photo=True,
             caption=f"🔔 <b>НОВАЯ БРОНЬ №{booking.id}</b>",
         ),
+        admin2_state,
         db,
         bot,
         cfg,
@@ -2085,6 +2221,8 @@ async def test_multi_admin(db: Database) -> None:
     await db.add_notification(race.id, ADMIN_ID_2, 5002)
     race_bot = BotSpy()
     race_bot.profiles.update(bot.profiles)
+    race_state_1 = make_fsm_context(ADMIN_ID)
+    race_state_2 = make_fsm_context(ADMIN_ID_2)
     await asyncio.gather(
         admin_handlers.cb_decision(
             make_callback(
@@ -2094,6 +2232,7 @@ async def test_multi_admin(db: Database) -> None:
                 with_photo=True,
                 caption="🔔",
             ),
+            race_state_1,
             db,
             race_bot,
             cfg,
@@ -2106,11 +2245,14 @@ async def test_multi_admin(db: Database) -> None:
                 with_photo=True,
                 caption="🔔",
             ),
+            race_state_2,
             db,
             race_bot,
             cfg,
         ),
     )
+    await race_state_1.storage.close()
+    await race_state_2.storage.close()
     final = await db.get_booking(race.id)
     check(
         "При одновременном нажатии статус меняется один раз",
@@ -2131,45 +2273,68 @@ async def test_multi_admin(db: Database) -> None:
         any("Решение принял" in text_of(payload) for payload in race_alerts),
     )
 
-    # --- панель: список администраторов -------------------------------------- #
+    # --- панель: список и карточки администраторов --------------------------- #
+    from bot.ui.screens import Screen, ScreenCB, nav
+
     panel_bot = BotSpy()
     panel_bot.profiles[ADMIN_ID_3] = SimpleNamespace(
         id=ADMIN_ID_3, username="new_admin", full_name="Новый"
     )
     panel_bot.profiles.update(bot.profiles)
+    state = make_fsm_context(ADMIN_ID)
     mark = panel_bot.mark()
     await admin_handlers.cmd_admins(
         make_message(user_id=ADMIN_ID, bot=panel_bot, text="/admins", username="admin", first_name="Админ"),
+        state,
         db,
-        panel_bot,
         cfg,
+        admins,
     )
-    listed = panel_bot.new_messages(mark)[0]
-    check("Список администраторов отрисован", "Администраторы бота" in text_of(listed))
-    check("В списке показаны роли", "владелец" in text_of(listed))
-    check("В списке показан статус активности", "🟢 активен" in text_of(listed))
-    check("В списке показан Telegram ID", str(ADMIN_ID) in text_of(listed))
+    listed = panel_bot.step_payloads(mark)[-1]
+    check("Список администраторов отрисован", "АДМИНИСТРАТОРЫ" in text_of(listed))
+    check("В списке указано число записей и активных", "Записей: 2, активных: 2" in text_of(listed))
+    listed_btns = [b for row in markup_of(listed).inline_keyboard for b in row]
     check(
-        "Владельцу доступны кнопки управления",
-        any(b.text == "➕ Добавить" for row in markup_of(listed).inline_keyboard for b in row),
+        "Каждый администратор — отдельная кнопка карточки",
+        any(b.callback_data == nav(Screen.ADMIN_ADMIN, ADMIN_ID) for b in listed_btns),
     )
     check(
-        "Владелец из .env защищён — под ним нет кнопок",
+        "Владельцу доступна кнопка «➕ Добавить»",
+        any(b.text == "➕ Добавить" for b in listed_btns),
+    )
+
+    # Карточка владельца из .env — без кнопок отключения/удаления
+    mark = panel_bot.mark()
+    await client_handlers.cb_navigate(
+        make_callback(nav(Screen.ADMIN_ADMIN, ADMIN_ID), user_id=ADMIN_ID, bot=panel_bot),
+        ScreenCB(screen=Screen.ADMIN_ADMIN, arg=str(ADMIN_ID)),
+        state,
+        db,
+        cfg,
+        admins,
+    )
+    owner_card = panel_bot.step_payloads(mark)[-1]
+    owner_card_text = text_of(owner_card)
+    check(
+        "В карточке показаны роль, статус и Telegram ID",
+        all(part in owner_card_text for part in ("владелец", "🟢 активен", str(ADMIN_ID))),
+    )
+    check(
+        "Владелец из .env защищён — под ним нет кнопок управления",
         not any(
-            b.callback_data and str(ADMIN_ID) in b.callback_data
-            for row in markup_of(listed).inline_keyboard
+            b.callback_data and b.callback_data.startswith("ad:admin:")
+            for row in markup_of(owner_card).inline_keyboard
             for b in row
         ),
     )
 
     # --- панель: добавление администратора ----------------------------------- #
-    state = make_fsm_context(ADMIN_ID)
     mark = panel_bot.mark()
     await admin_handlers.cb_admin_add_start(
         make_callback(inline_keyboards.CB_ADMIN_ADD, user_id=ADMIN_ID, bot=panel_bot),
-        db,
-        panel_bot,
         state,
+        db,
+        cfg,
         admins,
     )
     check_equal("Включён режим ожидания ID", await state.get_state(), AdminFSM.waiting_admin_id)
@@ -2192,7 +2357,7 @@ async def test_multi_admin(db: Database) -> None:
     )
     check(
         "Вместо ID — понятная подсказка",
-        any("не похоже на Telegram ID" in t for t in panel_bot.new_texts(mark)),
+        any("не похоже на Telegram ID" in t for t in panel_bot.step_texts(mark)),
     )
     check_equal("Режим ввода не сброшен после ошибки", await state.get_state(), AdminFSM.waiting_admin_id)
     check("Посторонний не добавился в базу", await db.get_admin(ADMIN_ID_3) is None)
@@ -2209,11 +2374,11 @@ async def test_multi_admin(db: Database) -> None:
     check("Реестр сразу знает нового администратора", await admins.is_admin(ADMIN_ID_3))
     check(
         "Предупредили, что новичку нужно нажать /start",
-        any("/start" in t for t in panel_bot.new_texts(mark)),
+        any("/start" in t for t in panel_bot.step_texts(mark)),
     )
     check(
         "После добавления показан обновлённый список",
-        any("Администраторы бота" in t for t in panel_bot.new_texts(mark)),
+        any("АДМИНИСТРАТОРЫ" in t for t in panel_bot.step_texts(mark)),
     )
 
     # --- новый администратор получает доступ --------------------------------- #
@@ -2221,22 +2386,24 @@ async def test_multi_admin(db: Database) -> None:
         "Добавленный проходит фильтр IsAdmin",
         await IsAdmin()(_event(ADMIN_ID_3), admins=admins, cfg=cfg, db=db),
     )
+    operator_state = make_fsm_context(ADMIN_ID_3)
     mark = panel_bot.mark()
     await admin_handlers.cmd_admin(
         make_message(user_id=ADMIN_ID_3, bot=panel_bot, text="/admin", username="new_admin", first_name="Новый"),
+        operator_state,
         db,
         cfg,
+        admins,
     )
-    check("Новому администратору доступна статистика", any("Всего заявок" in t for t in panel_bot.new_texts(mark)))
+    check("Новому администратору доступна статистика", any("Заявок всего" in t for t in panel_bot.step_texts(mark)))
 
     # --- права: оператор не управляет списком -------------------------------- #
-    operator_state = make_fsm_context(ADMIN_ID_3)
     mark = panel_bot.mark()
     await admin_handlers.cb_admin_add_start(
         make_callback(inline_keyboards.CB_ADMIN_ADD, user_id=ADMIN_ID_3, bot=panel_bot),
-        db,
-        panel_bot,
         operator_state,
+        db,
+        cfg,
         admins,
     )
     denies = [payload for name, payload in panel_bot.since(mark) if name == "AnswerCallbackQuery"]
@@ -2247,12 +2414,13 @@ async def test_multi_admin(db: Database) -> None:
     mark = panel_bot.mark()
     await admin_handlers.cmd_admins(
         make_message(user_id=ADMIN_ID_3, bot=panel_bot, text="/admins", username="new_admin", first_name="Новый"),
+        operator_state,
         db,
-        panel_bot,
         cfg,
+        admins,
     )
-    operator_view = panel_bot.new_messages(mark)[0]
-    check("Оператор видит список администраторов", "Администраторы бота" in text_of(operator_view))
+    operator_view = panel_bot.step_payloads(mark)[-1]
+    check("Оператор видит список администраторов", "АДМИНИСТРАТОРЫ" in text_of(operator_view))
     check("Оператору объяснили отсутствие прав", "только владелец" in text_of(operator_view))
     check(
         "У оператора нет кнопок управления",
@@ -2263,10 +2431,19 @@ async def test_multi_admin(db: Database) -> None:
         ),
     )
 
-    # --- включение/отключение ------------------------------------------------ #
+    # --- включение/отключение (открываем карточку и жмём кнопку) ------------- #
+    await client_handlers.cb_navigate(
+        make_callback(nav(Screen.ADMIN_ADMIN, ADMIN_ID_3), user_id=ADMIN_ID, bot=panel_bot),
+        ScreenCB(screen=Screen.ADMIN_ADMIN, arg=str(ADMIN_ID_3)),
+        state,
+        db,
+        cfg,
+        admins,
+    )
     mark = panel_bot.mark()
     await admin_handlers.cb_admin_toggle(
         make_callback(inline_keyboards.admin_toggle_callback(ADMIN_ID_3), user_id=ADMIN_ID, bot=panel_bot),
+        state,
         db,
         panel_bot,
         cfg,
@@ -2275,13 +2452,14 @@ async def test_multi_admin(db: Database) -> None:
     check("Администратор отключён кнопкой", not (await db.get_admin(ADMIN_ID_3)).is_active)
     check("Отключённый потерял доступ", not await admins.is_admin(ADMIN_ID_3))
     check(
-        "В списке показан статус «отключён»",
+        "В карточке показан статус «отключён»",
         any("🔴 отключён" in t for t in panel_bot.step_texts(mark)),
     )
     check("Об отключении сообщили", any("отключён" in text_of(p) for p in panel_bot.answers()[-1:]))
 
     await admin_handlers.cb_admin_toggle(
         make_callback(inline_keyboards.admin_toggle_callback(ADMIN_ID_3), user_id=ADMIN_ID, bot=panel_bot),
+        state,
         db,
         panel_bot,
         cfg,
@@ -2293,6 +2471,7 @@ async def test_multi_admin(db: Database) -> None:
     # --- смена роли ---------------------------------------------------------- #
     await admin_handlers.cb_admin_role(
         make_callback(inline_keyboards.admin_promote_callback(ADMIN_ID_3), user_id=ADMIN_ID, bot=panel_bot),
+        state,
         db,
         panel_bot,
         cfg,
@@ -2305,6 +2484,7 @@ async def test_multi_admin(db: Database) -> None:
     mark = panel_bot.mark()
     await admin_handlers.cb_admin_delete(
         make_callback(inline_keyboards.admin_delete_callback(ADMIN_ID), user_id=ADMIN_ID, bot=panel_bot),
+        state,
         db,
         panel_bot,
         cfg,
@@ -2317,6 +2497,7 @@ async def test_multi_admin(db: Database) -> None:
     mark = panel_bot.mark()
     await admin_handlers.cb_admin_delete(
         make_callback(inline_keyboards.admin_delete_callback(ADMIN_ID_3), user_id=ADMIN_ID_3, bot=panel_bot),
+        operator_state,
         db,
         panel_bot,
         cfg,
@@ -2331,6 +2512,7 @@ async def test_multi_admin(db: Database) -> None:
     mark = panel_bot.mark()
     await admin_handlers.cb_admin_role(
         make_callback(inline_keyboards.admin_demote_callback(ADMIN_ID_3), user_id=ADMIN_ID_3, bot=panel_bot),
+        operator_state,
         db,
         panel_bot,
         cfg,
@@ -2347,6 +2529,7 @@ async def test_multi_admin(db: Database) -> None:
 
     await admin_handlers.cb_admin_role(
         make_callback(inline_keyboards.admin_demote_callback(ADMIN_ID_3), user_id=ADMIN_ID, bot=panel_bot),
+        state,
         db,
         panel_bot,
         cfg,
@@ -2361,7 +2544,9 @@ async def test_multi_admin(db: Database) -> None:
     await admin_handlers.cb_admin_add_cancel(
         make_callback(inline_keyboards.CB_ADMIN_ADD_CANCEL, user_id=ADMIN_ID, bot=panel_bot),
         cancel_state,
-        panel_bot,
+        db,
+        cfg,
+        admins,
     )
     check_equal("Отмена сбрасывает режим ввода", await cancel_state.get_state(), None)
     check("Об отмене сообщили", any("отменено" in t for t in panel_bot.step_texts(mark)))
@@ -2370,6 +2555,7 @@ async def test_multi_admin(db: Database) -> None:
     mark = panel_bot.mark()
     await admin_handlers.cb_admin_delete(
         make_callback(inline_keyboards.admin_delete_callback(ADMIN_ID_3), user_id=ADMIN_ID, bot=panel_bot),
+        state,
         db,
         panel_bot,
         cfg,
@@ -2379,16 +2565,18 @@ async def test_multi_admin(db: Database) -> None:
     check("Удалённый потерял доступ", not await admins.is_admin(ADMIN_ID_3))
     check("Об удалении сообщили", any("удален" in text_of(p) for p in panel_bot.answers()[-1:]))
 
-    # --- статистика и приветствие -------------------------------------------- #
+    # --- статистика и кнопка «🛠 Админ-панель» в меню ------------------------ #
     stats = await db.get_stats()
     check("Статистика считает администраторов", stats.admins == 2 and stats.admins_active == 2)
     mark = panel_bot.mark()
     await admin_handlers.cmd_admin(
         make_message(user_id=ADMIN_ID, bot=panel_bot, text="/admin", username="admin", first_name="Админ"),
+        state,
         db,
         cfg,
+        admins,
     )
-    panel_payload = panel_bot.new_messages(mark)[0]
+    panel_payload = panel_bot.step_payloads(mark)[-1]
     check("В статистике панели видно администраторов", "Администраторов" in text_of(panel_payload))
     check(
         "В панели есть кнопка «👥 Администраторы»",
@@ -2406,13 +2594,17 @@ async def test_multi_admin(db: Database) -> None:
         cfg,
         admins,
     )
-    greeting = panel_bot.new_texts(mark)
+    greeting = panel_bot.step_texts(mark)
+    admin_menu_payload = [
+        p for p in panel_bot.step_payloads(mark) if getattr(markup_of(p), "inline_keyboard", None)
+    ][-1]
+    admin_menu_btns = [b.text for row in markup_of(admin_menu_payload).inline_keyboard for b in row]
+    check("У администратора в меню есть кнопка «🛠 Админ-панель»", "🛠 Админ-панель" in admin_menu_btns)
     check(
         "Администратору /start показывает служебную подсказку",
         any("Вы — администратор бота" in t for t in greeting),
     )
     check("В подсказке названа роль", any("администратор" in t for t in greeting))
-    check("В подсказке упомянута команда /admin", any("/admin" in t for t in greeting))
 
     mark = panel_bot.mark()
     client_state = make_fsm_context(MULTI_CLIENT_ID)
@@ -2429,9 +2621,14 @@ async def test_multi_admin(db: Database) -> None:
         cfg,
         admins,
     )
+    guest_menu_payload = [
+        p for p in panel_bot.step_payloads(mark) if getattr(markup_of(p), "inline_keyboard", None)
+    ][-1]
+    guest_menu_btns = [b.text for row in markup_of(guest_menu_payload).inline_keyboard for b in row]
+    check("У обычного гостя кнопки «🛠 Админ-панель» нет", "🛠 Админ-панель" not in guest_menu_btns)
     check(
         "Клиенту служебная подсказка администратора не показывается",
-        not any("Вы — администратор бота" in t for t in panel_bot.new_texts(mark)),
+        not any("Вы — администратор бота" in t for t in panel_bot.step_texts(mark)),
     )
 
     # --- команды панели без прав --------------------------------------------- #
@@ -2466,7 +2663,7 @@ async def test_multi_admin(db: Database) -> None:
     await db.set_admin_active(ADMIN_ID_2, True)
     admins.remember(ADMIN_ID_2)
 
-    for context in (state, operator_state, cancel_state, admin_state, client_state):
+    for context in (admin2_state, state, operator_state, cancel_state, admin_state, client_state):
         await context.storage.close()
 
 
@@ -2508,17 +2705,17 @@ async def test_payment_choice(db: Database, cfg: AppConfig) -> None:
         make_callback(inline_keyboards.CB_PAY_SPOT, user_id=client_id, bot=bot),
         state,
         db,
-        bot,
         cfg,
     )
     check_equal("После «на месте» FSM очищен", await state.get_state(), None)
 
     spot_texts = bot.step_texts(mark)
-    check("Клиенту подтверждена заявка без чека", any("Заявка принята" in t for t in spot_texts))
+    check("Клиенту подтверждена заявка без чека", any("ЗАЯВКА ОТПРАВЛЕНА" in t for t in spot_texts))
     check("В подтверждении сказано про оплату на месте", any("на месте" in t for t in spot_texts))
+    spot_client_payload = [p for p in bot.step_payloads(mark) if getattr(p, "chat_id", None) == client_id][-1]
     check(
-        "Клиенту вернули главное меню",
-        any("Частые вопросы" in t for t in spot_texts) or any("Меню бота" in t for t in spot_texts),
+        "Под подтверждением есть кнопки возврата в меню",
+        any(b.text == "🏠 В меню" for row in markup_of(spot_client_payload).inline_keyboard for b in row),
     )
 
     spot_bookings = [b for b in await db.list_bookings(BookingStatus.PENDING, limit=50) if b.client_name == "Гость"]
@@ -2564,7 +2761,6 @@ async def test_payment_choice(db: Database, cfg: AppConfig) -> None:
             make_callback(inline_keyboards.CB_PAY_SPOT, user_id=client_id, bot=bot),
             weekend_state,
             db,
-            bot,
             cfg,
         )
         alerts = [p for n, p in bot.since(mark) if n == "AnswerCallbackQuery"]
@@ -2594,13 +2790,104 @@ async def test_payment_choice(db: Database, cfg: AppConfig) -> None:
         make_callback(inline_keyboards.CB_PAY_CHECK, user_id=client_id, bot=bot),
         check_state,
         db,
-        bot,
         cfg,
     )
     check_equal("Выбор чека → ожидание фото", await check_state.get_state(), BookingFSM.waiting_receipt.state)
 
     await state.storage.close()
     await check_state.storage.close()
+
+# --------------------------------------------------------------------------- #
+# 14. Интерфейс одного экрана (HUD): переходы, стек «Назад», нет мусора в чате
+# --------------------------------------------------------------------------- #
+async def test_single_screen_hud(db: Database, dispatcher: Dispatcher) -> None:
+    """Проверить, что вся прогулка по разделам правит ОДНО сообщение."""
+    from bot.ui.screens import SCREEN_BACK, SCREEN_TITLES, Screen, nav
+
+    print("\n— Одноэкранный HUD-интерфейс —")
+    bot = BotSpy()
+
+    guest_id = 606_707_808
+    await db.upsert_user(guest_id, "hud_guest", "Игрок")
+    await db.set_consent(guest_id, granted=True)
+    await db.upsert_user(ADMIN_ID, "hud_owner", "Владелец")
+    await db.set_consent(ADMIN_ID, granted=True)
+
+    seq = 0
+
+    async def send(event: Any) -> int:
+        nonlocal seq
+        seq += 1
+        mark = bot.mark()
+        await dispatcher.feed_update(bot, make_update(seq, event))
+        return mark
+
+    # 1. /start создаёт ровно одно сообщение-экран
+    m = await send(make_message(user_id=guest_id, bot=bot, text="/start"))
+    created = [p for n, p in bot.since(m) if n == "SendMessage"]
+    check_equal("HUD: /start отправляет ровно одно сообщение", len(created), 1)
+    screen_msg_id = bot._message_ids
+
+    def cb(data: str, uid: int = guest_id, mid: int = screen_msg_id) -> CallbackQuery:
+        src = make_message(user_id=uid, bot=bot, message_id=mid)
+        return CallbackQuery(
+            id=f"hud_{abs(hash((data, seq))) % 10**8}",
+            from_user=src.from_user,
+            chat_instance="hud",
+            message=src,
+            data=data,
+        ).as_(bot)
+
+    # 2. 10 переходов подряд → 0 новых SendMessage, 10 EditMessageText того же id
+    walk = [
+        nav(Screen.PRICES),
+        nav(Screen.FAQ),
+        nav(Screen.FAQ_ITEM, "night"),
+        nav(Screen.FAQ_ITEM, "prepay"),
+        nav(SCREEN_BACK),
+        nav(SCREEN_BACK),
+        nav(Screen.CONTACTS),
+        nav(Screen.RULES),
+        nav(Screen.BOOKINGS),
+        nav(Screen.MENU),
+    ]
+    mark = bot.mark()
+    for step in walk:
+        await send(cb(step))
+    sends_during_walk = [p for n, p in bot.since(mark) if n == "SendMessage"]
+    edits_during_walk = [p for n, p in bot.since(mark) if n == "EditMessageText"]
+    check_equal("HUD: за 10 переходов 0 новых сообщений в чате", len(sends_during_walk), 0)
+    check_equal("HUD: все 10 переходов обновили тот же экран", len(edits_during_walk), 10)
+    check(
+        "HUD: правился один и тот же message_id",
+        {p.message_id for p in edits_during_walk} == {screen_msg_id},
+    )
+
+    # 3. Все заголовки экранов покрыты
+    check("HUD: у каждого экрана есть заголовок", len(SCREEN_TITLES) >= 18)
+
+    # 4. У гостя в меню нет админки, у администратора — есть, и она открывает панель
+    guest_last = edits_during_walk[-1]
+    guest_btns = [b.text for r in markup_of(guest_last).inline_keyboard for b in r]
+    check("HUD: гость не видит кнопку админ-панели", "🛠 Админ-панель" not in guest_btns)
+
+    m = await send(make_message(user_id=ADMIN_ID, bot=bot, text="/start", username="hud_owner", first_name="Владелец"))
+    admin_screen = [p for p in bot.step_payloads(m) if getattr(markup_of(p), "inline_keyboard", None)][-1]
+    admin_mid = getattr(admin_screen, "message_id", None) or bot._message_ids
+    admin_btns = [b.text for r in markup_of(admin_screen).inline_keyboard for b in r]
+    check("HUD: администратор видит «🛠 Админ-панель» в клавиатуре меню", "🛠 Админ-панель" in admin_btns)
+
+    m = await send(cb(nav(Screen.ADMIN), uid=ADMIN_ID, mid=admin_mid))
+    check(
+        "HUD: нажатие «🛠 Админ-панель» открывает сводку",
+        any("АДМИН-ПАНЕЛЬ" in t for t in bot.step_texts(m)),
+    )
+    m = await send(cb(nav(SCREEN_BACK), uid=ADMIN_ID, mid=admin_mid))
+    check(
+        "HUD: «◀ Назад» из админ-панели возвращает в главное меню",
+        any("ГЛАВНОЕ МЕНЮ" in t for t in bot.step_texts(m)),
+    )
+
 
 # --------------------------------------------------------------------------- #
 # 12. Обновление базы, созданной предыдущей версией бота
@@ -2717,6 +3004,7 @@ async def run_all() -> int:
         dispatcher = build_dispatcher(db, cfg, admins)
         await test_wiring(db, cfg, dispatcher)
         await test_dispatcher_routing(db, cfg, dispatcher)
+        await test_single_screen_hud(db, dispatcher)
         await dispatcher.storage.close()
 
         await test_multi_admin(db)

@@ -14,6 +14,7 @@ from bot.keyboards.inline import (
     CB_ADMIN_REJECT_PREFIX,
     CB_ADMIN_STATS,
     CB_ADMIN_TOGGLE_PREFIX,
+    CB_BOOKING_BACK,
     CB_BOOKING_CANCEL,
     CB_CONSENT_GIVE,
     CB_CONSENT_REVOKE,
@@ -59,7 +60,6 @@ from bot.keyboards.reply import (
 )
 
 __all__ = [
-    ")",
     "ADMIN_CALLBACK_PREFIXES",
     "ALL_MENU_BUTTONS",
     "BOOKING_CALLBACK_PREFIXES",
@@ -74,6 +74,7 @@ __all__ = [
     "CB_ADMIN_REJECT_PREFIX",
     "CB_ADMIN_STATS",
     "CB_ADMIN_TOGGLE_PREFIX",
+    "CB_BOOKING_BACK",
     "CB_BOOKING_CANCEL",
     "CB_CONSENT_GIVE",
     "CB_CONSENT_REVOKE",

@@ -15,6 +15,7 @@ from bot.utils.telegram import (
     safe_delete_message,
     safe_edit_message_caption,
     safe_edit_message_text,
+    send_screen,
 )
 
 __all__ = [
@@ -30,4 +31,5 @@ __all__ = [
     "safe_delete_message",
     "safe_edit_message_caption",
     "safe_edit_message_text",
+    "send_screen",
 ]

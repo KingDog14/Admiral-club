@@ -40,17 +40,13 @@ from bot.services.admins import AdminRegistry
 logger = logging.getLogger("admiral.bot")
 
 #: Команды, видимые всем пользователям в меню клиента Telegram.
+#: Админ-панель открывается кнопкой в главном меню (её видят только
+#: администраторы), поэтому в меню команд её выносить не нужно.
 COMMON_BOT_COMMANDS: tuple[BotCommand, ...] = (
     BotCommand(command="start", description="Главное меню клуба"),
     BotCommand(command="help", description="Как забронировать место"),
     BotCommand(command="cancel", description="Отменить бронирование"),
     BotCommand(command="privacy", description="Персональные данные (152-ФЗ)"),
-)
-
-#: Дополнительные команды, видимые только в чатах администраторов.
-ADMIN_BOT_COMMANDS: tuple[BotCommand, ...] = (
-    BotCommand(command="admin", description="Админ-панель: статистика и брони"),
-    BotCommand(command="admins", description="Администраторы клуба"),
 )
 
 
@@ -88,23 +84,18 @@ def setup_logging(level: str) -> None:
 
 
 async def _setup_bot_commands(bot: Bot, admin_ids: tuple[int, ...]) -> None:
-    """Прописать команды в меню Telegram.
-
-    Общий набор видят все; каждому администратору в его чате дополнительно
-    показываются ``/admin`` и ``/admins``.
-    """
+    """Прописать команды в меню Telegram и убрать старые команды у админов."""
     try:
         await bot.set_my_commands(list(COMMON_BOT_COMMANDS))
     except TelegramAPIError as exc:
         logger.warning("Не удалось обновить общий список команд бота: %s", exc)
 
-    admin_commands = [*COMMON_BOT_COMMANDS, *ADMIN_BOT_COMMANDS]
+    # Сбросить персональные меню администраторов от предыдущих версий бота.
     for admin_id in admin_ids:
         try:
-            await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
+            await bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=admin_id))
         except TelegramAPIError as exc:
-            # Администратор мог ещё не начинать диалог с ботом — не критично.
-            logger.warning("Не удалось обновить команды для администратора %s: %s", admin_id, exc)
+            logger.debug("Не удалось сбросить меню команд для %s: %s", admin_id, exc)
 
 
 async def run_polling(cfg: AppConfig) -> None:
