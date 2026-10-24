@@ -179,20 +179,49 @@ async def _apply_admin_view(
 ) -> None:
     """Обновить сообщение администратора после решения по заявке.
 
-    * если это фото чека — дописываем отметку в подпись и убираем кнопки;
-    * если это текстовый экран «Активные брони» — перерисовываем его (заявка
-      исчезает из списка без нового сообщения).
+    * если решение нажато под отдельным push-уведомлением о новой брони
+      (фото чека или карточка «НОВАЯ БРОНЬ» без чека) — дописываем итог и гасим
+      кнопки;
+    * если решение нажато внутри экрана «Активные брони» — перерисовываем экран,
+      и обработанная заявка сразу пропадает из очереди.
     """
+    from bot.utils.telegram import safe_edit_message_text
+
     message = callback.message
     chat_id, message_id = message.chat.id, message.message_id
 
-    if getattr(message, "photo", None):
-        caption = getattr(message, "caption", "") or ""
-        if note.strip() in caption:  # отметка уже есть — не дублируем
+    screen_mid = (await state.get_data()).get(DATA_SCREEN_MESSAGE)
+    markup = getattr(message, "reply_markup", None)
+    has_nav_buttons = bool(
+        markup
+        and getattr(markup, "inline_keyboard", None)
+        and any(
+            (b.callback_data or "").startswith("nav:")
+            for row in markup.inline_keyboard
+            for b in row
+        )
+    )
+    is_screen = (screen_mid is not None and int(screen_mid) == message_id) or has_nav_buttons
+
+    caption = getattr(message, "caption", "") or ""
+    raw_text = getattr(message, "text", "") or ""
+    is_push_photo = bool(getattr(message, "photo", None)) and (
+        "НОВАЯ БРОНЬ" in caption or not is_screen
+    )
+
+    if is_push_photo:
+        if note.strip() in caption:
             return
         updated = truncate(caption + note, CAPTION_LIMIT)
         if not await safe_edit_message_caption(bot, chat_id, message_id, updated):
             await bot.send_message(chat_id=chat_id, text=truncate(note.strip(), MESSAGE_LIMIT))
+        return
+
+    if "НОВАЯ БРОНЬ" in raw_text:
+        if note.strip() not in raw_text:
+            updated = truncate(raw_text + note, MESSAGE_LIMIT)
+            if not await safe_edit_message_text(bot, chat_id, message_id, updated):
+                await bot.send_message(chat_id=chat_id, text=truncate(note.strip(), MESSAGE_LIMIT))
         return
 
     navigator = _navigate(callback, db=db, cfg=cfg, state=state, admins=admins)

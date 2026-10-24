@@ -1,14 +1,12 @@
-"""Навигатор: один экран — одно сообщение, которое бот перезаписывает.
+"""Навигатор графического интерфейса: один фото-экран на весь диалог.
 
-Класс :class:`Navigator` решает главную задачу интерфейса: не плодить сообщения
-в чате. Он помнит, какое сообщение является «экраном» пользователя, и всегда
-перезаписывает именно его (``editMessageText``). Если Telegram не дал
-отредактировать (сообщение старше 48 часов, удалено, текст не изменился) —
-экран отправляется новым сообщением, а его ``message_id`` запоминается.
+Класс :class:`Navigator` ведёт одно рабочее фото-сообщение пользователя:
 
-Кроме показа экранов навигатор ведёт **стек переходов**: «◀ Назад» возвращает
-пользователя туда, откуда он пришёл, а не всегда в меню. Стек живёт в FSM-данных,
-поэтому переживает перезапуск обработчика, но не перезапуск процесса.
+* при первом открытии отправляет карточку через ``sendPhoto``;
+* при всех переходах по меню, FAQ, правилам, шагам брони и админ-панели меняет
+  карточку, подпись и кнопки **в том же сообщении** через ``editMessageMedia``;
+* если старое сообщение недоступно (удалено, старше 48 часов или осталось от
+  текстовой версии бота) — отправляет свежую карточку и аккуратно удаляет старое.
 """
 
 from __future__ import annotations
@@ -24,20 +22,20 @@ from bot.config import AppConfig
 from bot.db.database import Database
 from bot.services.admins import AdminRegistry
 from bot.states import DATA_SCREEN, DATA_SCREEN_MESSAGE, DATA_SCREEN_STACK
-from bot.ui.render import MESSAGE_LIMIT, ViewContext, render_screen
+from bot.ui.render import CAPTION_LIMIT, ScreenView, ViewContext, render_screen
 from bot.ui.screens import SCREEN_BACK, Screen
-from bot.utils.formatting import truncate
-from bot.utils.telegram import safe_delete_message, safe_edit_message_text, send_screen
+from bot.utils.formatting import truncate, truncate_html
+from bot.utils.telegram import safe_delete_message, safe_edit_message_media, send_photo_screen
 
 logger = logging.getLogger(__name__)
 
-#: Глубина стека переходов: больше не нужно, чтобы «Назад» не вёл в бесконечность.
+#: Максимальная глубина стека возвратов «◀ Назад».
 STACK_LIMIT: int = 20
 
-#: Ограничение Telegram на длину текста всплывающего окна.
+#: Ограничение Telegram на длину текста тоста/alert в callback.answer.
 ALERT_LIMIT: int = 200
+MESSAGE_TEXT_LIMIT: int = 4096
 
-#: Ключи записи об экране в FSM-данных (JSON-совместимые — MemoryStorage и Redis).
 _KEY_SCREEN = "s"
 _KEY_ARG = "a"
 
@@ -47,13 +45,7 @@ def _entry(screen: str, arg: str = "") -> dict[str, str]:
 
 
 class Navigator:
-    """Показывает экраны и водит по ним пользователя.
-
-    Один объект создаётся на один апдейт — из сообщения или из нажатия кнопки.
-    Если навигатор создан из :class:`CallbackQuery`, он дополнительно умеет
-    отвечать на сам запрос (:meth:`answer`) — иначе снять «часики» с кнопки
-    было бы нечем.
-    """
+    """Управляет показами графических карточек и стеком переходов «◀ Назад»."""
 
     def __init__(
         self,
@@ -76,12 +68,8 @@ class Navigator:
         self.user_id = user_id
         self.user = user
         self.callback = callback
-        #: id сообщения-экрана, если он известен сразу (нажатие кнопки).
         self.message_id = message_id
-        #: Скрыть reply-клавиатуру при следующей отправке нового экрана.
-        self._clear_reply_keyboard = False
 
-    # --- конструкторы ------------------------------------------------------- #
     @classmethod
     def from_message(
         cls,
@@ -92,7 +80,6 @@ class Navigator:
         state: FSMContext,
         admins: AdminRegistry | None = None,
     ) -> Navigator:
-        """Навигатор для сообщения: id экрана достаём из FSM-памяти."""
         return cls(
             bot=message.bot,
             db=db,
@@ -113,7 +100,6 @@ class Navigator:
         state: FSMContext,
         admins: AdminRegistry | None = None,
     ) -> Navigator:
-        """Навигатор для нажатия кнопки: экран — сообщение под кнопкой."""
         message = callback.message
         return cls(
             bot=callback.bot,
@@ -127,10 +113,8 @@ class Navigator:
             callback=callback,
         )
 
-    # --- состояние ---------------------------------------------------------- #
     @property
     def context(self) -> ViewContext:
-        """Контекст для рендереров экранов."""
         return ViewContext(
             db=self.db,
             cfg=self.cfg,
@@ -142,7 +126,6 @@ class Navigator:
         )
 
     async def current(self) -> dict[str, str]:
-        """Текущий экран (по умолчанию — меню)."""
         entry = (await self.state.get_data()).get(DATA_SCREEN)
         if isinstance(entry, dict) and entry.get(_KEY_SCREEN):
             return {
@@ -155,9 +138,7 @@ class Navigator:
         stack = (await self.state.get_data()).get(DATA_SCREEN_STACK)
         if not isinstance(stack, list):
             return []
-        return [
-            item for item in stack if isinstance(item, dict) and item.get(_KEY_SCREEN)
-        ]
+        return [item for item in stack if isinstance(item, dict) and item.get(_KEY_SCREEN)]
 
     # --- переходы ----------------------------------------------------------- #
     async def show(
@@ -168,25 +149,20 @@ class Navigator:
         push: bool = True,
         note: str | None = None,
     ) -> None:
-        """Показать экран, перезаписав сообщение.
-
-        ``push=True`` — запомнить текущий экран в стеке, чтобы «Назад» вернул на
-        него. ``push=False`` — заменить экран без запоминания (обновление,
-        возврат по стеку, сброс в меню).
-        """
+        """Показать экран, обновив карточку и подпись текущего сообщения."""
         if screen == SCREEN_BACK:
             await self.back()
             return
 
         arg = str(arg)
         previous = await self.current()
-        same = (
-            previous.get(_KEY_SCREEN) == screen
-            and str(previous.get(_KEY_ARG) or "") == arg
-        )
+        prev_screen = previous.get(_KEY_SCREEN)
+        same = prev_screen == screen and str(previous.get(_KEY_ARG) or "") == arg
+        # Переключение вкладок внутри «Правил» не засоряет стек «Назад».
+        same_rules_tab = prev_screen == Screen.RULES and screen == Screen.RULES
 
         stack = await self._stack()
-        if push and not same and previous.get(_KEY_SCREEN):
+        if push and not same and not same_rules_tab and prev_screen and prev_screen != Screen.CONSENT:
             stack.append(previous)
 
         await self.state.update_data(
@@ -198,7 +174,7 @@ class Navigator:
         await self.redraw(note=note)
 
     async def back(self) -> None:
-        """Вернуться на предыдущий экран; если стека нет — в меню."""
+        """Вернуться на предыдущий экран; если стек пуст — в главное меню."""
         stack = await self._stack()
         if not stack:
             await self.show(Screen.MENU, push=False)
@@ -212,14 +188,12 @@ class Navigator:
         )
 
     async def refresh(self) -> None:
-        """Перерисовать текущий экран теми же данными (кнопка «🔄 Обновить»)."""
+        """Перерисовать текущий экран свежими данными."""
         await self.redraw()
 
     async def reset(self, screen: str = Screen.MENU, arg: str = "") -> None:
-        """Сбросить стек и показать экран — точка входа командой (/admin)."""
-        await self.state.update_data(
-            **{DATA_SCREEN_STACK: [], DATA_SCREEN: _entry(screen, arg)}
-        )
+        """Сбросить стек переходов и показать выбранный экран."""
+        await self.state.update_data(**{DATA_SCREEN_STACK: [], DATA_SCREEN: _entry(screen, arg)})
         await self.show(screen, arg, push=False)
 
     async def restart(
@@ -229,14 +203,8 @@ class Navigator:
         *,
         old_message_id: int | None = None,
     ) -> None:
-        """Начать новое сообщение-экран, старое удалить (``/start``).
-
-        Так меню всегда оказывается внизу чата и видно сразу, а предыдущее
-        рабочее сообщение бота не висит в истории мёртвым экраном. Заодно
-        скрывается reply-клавиатура, если она осталась от старой версии бота.
-        """
+        """Отправить свежую карточку в низ чата, а старый экран убрать (``/start``)."""
         self.message_id = None
-        self._clear_reply_keyboard = True
         await self.state.update_data(
             **{
                 DATA_SCREEN_STACK: [],
@@ -254,47 +222,57 @@ class Navigator:
 
     # --- отрисовка ---------------------------------------------------------- #
     async def redraw(self, *, note: str | None = None) -> None:
-        """Перерисовать текущий экран в сообщении-экране."""
+        """Перерисовать текущий экран в фото-сообщении."""
         entry = await self.current()
-        text, markup = await render_screen(
+        view = await render_screen(
             self.context, str(entry[_KEY_SCREEN]), str(entry.get(_KEY_ARG) or "")
         )
+        caption = view.caption
         if note:
-            text = truncate(f"{note}\n\n{text}", MESSAGE_LIMIT)
-        await self._draw(text, markup)
+            wrapped = note if "<blockquote>" in note else f"<blockquote>{note}</blockquote>"
+            caption = truncate_html(f"{wrapped}\n\n{caption}", CAPTION_LIMIT)
+        await self._draw(view, caption)
 
-    async def _draw(self, text: str, markup: InlineKeyboardMarkup | None) -> None:
-        """Отправить экран: правкой того же сообщения или новым сообщением."""
-        message_id = self.message_id or (await self.state.get_data()).get(
-            DATA_SCREEN_MESSAGE
-        )
+    async def _draw(self, view: ScreenView, caption: str) -> None:
+        """Обновить медиа-карточку на месте или отправить новую, удалив устаревшую."""
+        stored_id = (await self.state.get_data()).get(DATA_SCREEN_MESSAGE)
+        message_id = self.message_id or stored_id
 
         if message_id is not None:
-            if await safe_edit_message_text(
-                self.bot, self.user_id, int(message_id), text, markup
+            mid = int(message_id)
+            if await safe_edit_message_media(
+                self.bot,
+                self.user_id,
+                mid,
+                view.card,
+                caption,
+                view.reply_markup,
             ):
+                self.message_id = mid
+                if stored_id != mid:
+                    await self.state.update_data(**{DATA_SCREEN_MESSAGE: mid})
                 return
             logger.debug(
-                "Экран %s/%s не отредактировался — отправляю новым сообщением",
+                "Медиа-экран %s/%s не обновился — отправляю новую карточку",
                 self.user_id,
-                message_id,
+                mid,
             )
 
-        new_id = await send_screen(
+        new_id = await send_photo_screen(
             self.bot,
             self.user_id,
-            text,
-            markup,
-            clear_reply_keyboard=self._clear_reply_keyboard,
+            view.card,
+            caption,
+            view.reply_markup,
         )
-        self._clear_reply_keyboard = False
         if new_id:
+            if message_id is not None and int(message_id) != int(new_id):
+                await safe_delete_message(self.bot, self.user_id, int(message_id))
             self.message_id = new_id
             await self.state.update_data(**{DATA_SCREEN_MESSAGE: new_id})
 
-    # --- ответы на нажатия -------------------------------------------------- #
+    # --- ответы на callback ------------------------------------------------- #
     async def answer(self, text: str | None = None, *, alert: bool = False) -> None:
-        """Снять «часики» с кнопки: тост или всплывающее окно."""
         if self.callback is None:
             return
         if text:
@@ -303,20 +281,16 @@ class Navigator:
             await self.callback.answer()
 
     async def alert(self, text: str) -> None:
-        """Всплывающее окно с предупреждением."""
         await self.answer(text, alert=True)
 
-    async def notify(
-        self, text: str, markup: InlineKeyboardMarkup | None = None
-    ) -> None:
-        """Отдельное сообщение вне экрана (например, результат подтверждения)."""
+    async def notify(self, text: str, markup: InlineKeyboardMarkup | None = None) -> None:
         await self.bot.send_message(
             chat_id=self.user_id,
-            text=truncate(text, MESSAGE_LIMIT),
+            text=truncate(text, MESSAGE_TEXT_LIMIT),
             reply_markup=markup,
         )
 
-    def __repr__(self) -> str:  # pragma: no cover — отладочная мелочь
+    def __repr__(self) -> str:  # pragma: no cover
         return f"<Navigator user={self.user_id} message={self.message_id}>"
 
 

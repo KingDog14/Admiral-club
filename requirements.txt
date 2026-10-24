@@ -1,7 +1,7 @@
-# Зависимости бота ПК-клуба (Python 3.10+).
+# Зависимости бота ПК-клуба ADMIRAL (Python 3.10+).
 # Установка:  pip install -r requirements.txt
-# Версии, на которых проект проверен, указаны в комментариях.
 
 aiogram
 aiosqlite
+pillow
 python-dotenv

@@ -230,11 +230,21 @@ def parse_admin_list_page(data: str | None) -> int | None:
 # --- клавиатуры -------------------------------------------------------------
 
 
+_SUPPORTS_STYLE: bool = "style" in InlineKeyboardButton.model_fields
+
+
+def _btn(text: str, callback_data: str, *, style: str | None = None) -> InlineKeyboardButton:
+    """Собрать кнопку с нативным цветовым акцентом Bot API (если поддерживается)."""
+    if style and _SUPPORTS_STYLE:
+        return InlineKeyboardButton(text=text, callback_data=callback_data, style=style)
+    return InlineKeyboardButton(text=text, callback_data=callback_data)
+
+
 def consent_keyboard() -> InlineKeyboardMarkup:
     """Экран согласия на обработку персональных данных (152-ФЗ)."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Я согласен", callback_data=CB_CONSENT_GIVE)],
+            [_btn("✅ Я согласен", CB_CONSENT_GIVE, style="success")],
         ]
     )
 
@@ -243,7 +253,7 @@ def privacy_keyboard() -> InlineKeyboardMarkup:
     """Раздел /privacy: кнопка отзыва согласия на обработку ПДн."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🚫 Отозвать согласие", callback_data=CB_CONSENT_REVOKE)],
+            [_btn("🚫 Отозвать согласие", CB_CONSENT_REVOKE, style="danger")],
         ]
     )
 
@@ -253,33 +263,26 @@ def revoke_confirm_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="✅ Да, отозвать", callback_data=CB_CONSENT_REVOKE_YES),
-                InlineKeyboardButton(text="↩️ Отмена", callback_data=CB_CONSENT_REVOKE_NO),
+                _btn("✅ Да, отозвать", CB_CONSENT_REVOKE_YES, style="danger"),
+                _btn("↩️ Отмена", CB_CONSENT_REVOKE_NO, style="success"),
             ],
         ]
     )
 
 
 def payment_choice_keyboard(prepayment_required: bool) -> InlineKeyboardMarkup:
-    """Шаг 4: как оплатить — прислать чек или заплатить на месте.
-
-    Если клуб требует полную предоплату (ночной пакет в ПТ–ВС), кнопка
-    «Оплачу на месте» не показывается: иначе клиент выбрал бы вариант,
-    противоречащий правилам.
-    """
+    """Шаг 4: как оплатить — прислать чек или заплатить на месте."""
     rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(text="📸 Оплатил — отправить чек", callback_data=CB_PAY_CHECK)],
+        [_btn("📸 Оплатил — отправить чек", CB_PAY_CHECK, style="primary")],
     ]
     if not prepayment_required:
-        rows.append(
-            [InlineKeyboardButton(text="💵 Оплачу на месте", callback_data=CB_PAY_SPOT)]
-        )
+        rows.append([_btn("💵 Оплачу на месте", CB_PAY_SPOT)])
     rows.append([_cancel_button()])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _cancel_button() -> InlineKeyboardButton:
-    return InlineKeyboardButton(text=CANCEL_BUTTON_TEXT, callback_data=CB_BOOKING_CANCEL)
+    return _btn(CANCEL_BUTTON_TEXT, CB_BOOKING_CANCEL, style="danger")
 
 
 def booking_cancel_keyboard() -> InlineKeyboardMarkup:
@@ -312,12 +315,8 @@ def booking_decision_keyboard(booking_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(
-                    text="✅ Подтвердить", callback_data=admin_approve_callback(booking_id)
-                ),
-                InlineKeyboardButton(
-                    text="❌ Отклонить", callback_data=admin_reject_callback(booking_id)
-                ),
+                _btn("✅ Подтвердить", admin_approve_callback(booking_id), style="success"),
+                _btn("❌ Отклонить", admin_reject_callback(booking_id), style="danger"),
             ]
         ]
     )

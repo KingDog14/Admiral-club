@@ -1,35 +1,30 @@
-"""Интерфейс бота: экраны, навигация и их отрисовка.
+"""Графический одноэкранный интерфейс бота клуба ADMIRAL.
 
-Бот работает как меню игрового клуба, а не как переписка:
-
-* у пользователя всегда **ровно один** экран — сообщение перезаписывается,
-  а не дублируется (``editMessageText``);
-* навигация — только inline-кнопки под этим сообщением;
-* «◀ Назад» ведёт на предыдущий экран (стек переходов), «🏠 В меню» — домой;
-* шапка экрана — моноширинная рамка с названием клуба.
-
-Модули:
-
-* :mod:`bot.ui.screens`  — идентификаторы экранов, ``callback_data``, рамки,
-  таблицы, клавиатуры;
-* :mod:`bot.ui.render`   — содержимое экранов (текст + клавиатура) по базе и
-  FSM-данным;
-* :mod:`bot.ui.navigator` — переходы, стек «Назад» и правка сообщения-экрана.
+* :mod:`bot.ui.cards`     — генерация HD-карточек (1280×720, Pillow) и кэш ``file_id``;
+* :mod:`bot.ui.screens`   — идентификаторы экранов, ``callback_data``, клавиатуры;
+* :mod:`bot.ui.render`    — сборка :class:`ScreenView` (карточка + подпись + кнопки);
+* :mod:`bot.ui.navigator` — переходы через ``editMessageMedia`` и стек «◀ Назад».
 """
 
+from bot.ui.cards import CardCache, RenderedCard, card_cache
 from bot.ui.navigator import ALERT_LIMIT, STACK_LIMIT, Navigator
-from bot.ui.render import MESSAGE_LIMIT, Renderer, ViewContext, render_screen
+from bot.ui.render import CAPTION_LIMIT, MESSAGE_LIMIT, Renderer, ScreenView, ViewContext, render_screen
 from bot.ui.screens import Screen, ScreenCB, nav
 
 __all__ = [
     "ALERT_LIMIT",
+    "CAPTION_LIMIT",
+    "CardCache",
     "MESSAGE_LIMIT",
-    "STACK_LIMIT",
     "Navigator",
+    "RenderedCard",
     "Renderer",
+    "STACK_LIMIT",
     "Screen",
     "ScreenCB",
+    "ScreenView",
     "ViewContext",
+    "card_cache",
     "nav",
     "render_screen",
 ]

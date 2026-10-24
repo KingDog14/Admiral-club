@@ -138,12 +138,18 @@ class BotSpy:
         #: chat_id → профиль, который вернёт get_chat (для подписи «решение принял …»)
         self.profiles: dict[int, SimpleNamespace] = {}
 
-    def _sent_message(self, kwargs: dict[str, Any]) -> SimpleNamespace:
-        """Подставить результат отправки: бот использует ``message.message_id``."""
+    def _sent_message(self, kwargs: dict[str, Any], *, with_photo: bool = False) -> SimpleNamespace:
+        """Подставить результат отправки: бот использует ``message.message_id`` и ``photo``."""
         self._message_ids += 1
+        photos = (
+            [SimpleNamespace(file_id=f"AgAC_card_{self._message_ids}")]
+            if with_photo
+            else None
+        )
         return SimpleNamespace(
             message_id=self._message_ids,
             chat=SimpleNamespace(id=kwargs.get("chat_id")),
+            photo=photos,
         )
 
     # --- путь через TelegramMethod (message.answer / callback.answer) ------- #
@@ -157,7 +163,7 @@ class BotSpy:
 
     async def send_photo(self, **kwargs: Any) -> Any:
         self.calls.append(("SendPhoto", SimpleNamespace(**kwargs)))
-        return self._sent_message(kwargs)
+        return self._sent_message(kwargs, with_photo=True)
 
     async def get_chat(self, chat_id: int, **kwargs: Any) -> Any:
         """Профиль пользователя — нужен, если администратора нет в таблице users."""
@@ -174,6 +180,10 @@ class BotSpy:
 
     async def edit_message_caption(self, **kwargs: Any) -> None:
         self.calls.append(("EditMessageCaption", SimpleNamespace(**kwargs)))
+
+    async def edit_message_media(self, **kwargs: Any) -> Any:
+        self.calls.append(("EditMessageMedia", SimpleNamespace(**kwargs)))
+        return self._sent_message(kwargs, with_photo=True)
 
     async def delete_message(self, **kwargs: Any) -> None:
         self.calls.append(("DeleteMessage", SimpleNamespace(**kwargs)))
@@ -215,15 +225,18 @@ class BotSpy:
         return [
             payload
             for name, payload in self.since(mark)
-            if name in ("SendMessage", "SendPhoto", "EditMessageText", "EditMessageCaption")
+            if name
+            in (
+                "SendMessage",
+                "SendPhoto",
+                "EditMessageText",
+                "EditMessageCaption",
+                "EditMessageMedia",
+            )
         ]
 
     def step_texts(self, mark: int) -> list[str]:
-        """Все тексты шага: и новые сообщения, и правки существующих.
-
-        Сценарий бронирования обновляет одно и то же сообщение (EditMessageText),
-        поэтому для проверки «что увидел клиент» нужно учитывать оба пути.
-        """
+        """Все тексты шага: и новые сообщения, и правки существующих."""
         return [text_of(payload) for payload in self.step_payloads(mark)]
 
 
@@ -232,8 +245,15 @@ async def _noop() -> None:
 
 
 def text_of(payload: Any) -> str:
-    """Текст сообщения или подпись к фото из записанного вызова."""
-    return str(getattr(payload, "text", None) or getattr(payload, "caption", None) or "")
+    """Текст сообщения или подпись к фото/медиа из записанного вызова."""
+    media = getattr(payload, "media", None)
+    media_caption = getattr(media, "caption", None) if media is not None else None
+    return str(
+        getattr(payload, "text", None)
+        or getattr(payload, "caption", None)
+        or media_caption
+        or ""
+    )
 
 
 def markup_of(payload: Any) -> Any:
@@ -605,14 +625,14 @@ def test_keyboards() -> None:
 
     guest_menu = menu_keyboard(is_admin=False)
     guest_buttons = [b.text for row in guest_menu.inline_keyboard for b in row]
-    check_equal("Главное меню гостя: 6 inline-кнопок", len(guest_buttons), 6)
+    check_equal("Главное меню гостя: 7 inline-кнопок", len(guest_buttons), 7)
     check(
         "У гостя нет кнопки «🛠 Админ-панель»",
         all("Админ-панель" not in t for t in guest_buttons),
     )
     admin_menu = menu_keyboard(is_admin=True)
     admin_buttons = [b.text for row in admin_menu.inline_keyboard for b in row]
-    check_equal("Главное меню администратора: 7 inline-кнопок", len(admin_buttons), 7)
+    check_equal("Главное меню администратора: 8 inline-кнопок", len(admin_buttons), 8)
     check("У администратора есть кнопка «🛠 Админ-панель»", "🛠 Админ-панель" in admin_buttons)
 
     faq_kb = faq_list_keyboard()
@@ -1120,21 +1140,21 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
     )
     check("Без согласия меню не выдаётся", "ГЛАВНОЕ МЕНЮ" not in "".join(sent))
 
-    # --- кнопка «Я согласен» — то же сообщение превращается в экран меню --- #
+    # --- кнопка «Я согласен» — то же фото-сообщение становится экраном меню - #
     mark = bot.mark()
     consent_callback = make_callback(inline_keyboards.CB_CONSENT_GIVE, user_id=client_id, bot=bot)
     await client_handlers.cb_consent_give(consent_callback, state, db, cfg)
     check("После кнопки согласие записано в базу", (await db.has_consent(client_id)) is True)
-    edits = [p for n, p in bot.since(mark) if n == "EditMessageText"]
+    edits = [p for n, p in bot.since(mark) if n == "EditMessageMedia"]
     check(
-        "Сообщение согласия перезаписано без нового сообщения (edit, не send)",
-        bool(edits) and not [p for n, p in bot.since(mark) if n == "SendMessage"],
+        "Сообщение согласия перезаписано без нового сообщения (editMessageMedia, не send)",
+        bool(edits) and not [p for n, p in bot.since(mark) if n in ("SendMessage", "SendPhoto")],
     )
     menu_text = text_of(edits[0])
-    check("На экране подтверждено согласие и открыто меню", "Согласие" in menu_text and "ГЛАВНОЕ МЕНЮ" in menu_text)
-    check("На экране моноширинная HUD-рамка клуба", "┌" in menu_text and "ADMIRAL" in menu_text)
+    check("На экране открыто главное меню клуба", "ADMIRAL" in menu_text and "ГЛАВНОЕ МЕНЮ" in menu_text)
+    check("В подписи нет code-блоков <pre>", "<pre>" not in menu_text)
     menu_btns = [b.text for row in markup_of(edits[0]).inline_keyboard for b in row]
-    check("В меню гостя 6 inline-кнопок без админки", len(menu_btns) == 6 and "🛠 Админ-панель" not in menu_btns)
+    check("В меню гостя 7 inline-кнопок без админки", len(menu_btns) == 7 and "🛠 Админ-панель" not in menu_btns)
     check("Тост о фиксации согласия отправлен", any("Согласие зафиксировано" in text_of(p) for p in bot.answers()))
 
     # --- повторный /start уже с согласием ----------------------------------- #
@@ -1144,7 +1164,7 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
     )
     check("После согласия /start открывает экран меню", any("ГЛАВНОЕ МЕНЮ" in t for t in bot.step_texts(mark)))
 
-    # --- шаг 1: вход в мастер по inline-кнопке «🎮 Забронировать» ----------- #
+    # --- шаг 1: вход в мастер по inline-кнопке «🎮 Забронировать место» ----- #
     mark = bot.mark()
     await client_handlers.cb_navigate(
         make_callback(nav(Screen.BOOK_TARIFF), user_id=client_id, bot=bot),
@@ -1155,7 +1175,7 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
     )
     check_equal("Шаг 1: состояние выбора тарифа", await state.get_state(), BookingFSM.choosing_tariff.state)
     tariff_payload = bot.step_payloads(mark)[-1]
-    check("Шаг 1 нарисован правкой того же сообщения", any(n == "EditMessageText" for n, _ in bot.since(mark)))
+    check("Шаг 1 нарисован правкой того же медиа-экрана", any(n == "EditMessageMedia" for n, _ in bot.since(mark)))
     check("Шаг 1 показывает залы", "Standart" in text_of(tariff_payload) and "S VIP" in text_of(tariff_payload))
     tariff_btns = [b for row in markup_of(tariff_payload).inline_keyboard for b in row]
     check("Шаг 1 содержит 4 зала + Назад + Отменить", len(tariff_btns) == 6)
@@ -1169,7 +1189,7 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
     )
     check_equal("Шаг 2: состояние выбора времени", await state.get_state(), BookingFSM.choosing_time.state)
     check_equal("Тариф сохранён в FSM", (await state.get_data()).get(DATA_TARIFF_KEY), "svip")
-    edited = [p for n, p in bot.since(mark) if n == "EditMessageText"]
+    edited = [p for n, p in bot.since(mark) if n == "EditMessageMedia"]
     check("Сообщение шага 1 заменено шагом 2", edited and "ШАГ 2/4" in text_of(edited[0]))
     check("Шаг 2 показывает текущее время клуба", "Сейчас в клубе" in text_of(edited[0]))
 
@@ -1250,10 +1270,11 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
     check("Для будней и своего времени предоплата не требуется", "на месте" in payment_text)
     pay_buttons = [b for row in markup_of(payment_payload).inline_keyboard for b in row]
     check(
-        "Доступны оба способа + Шаг назад + Отменить",
-        len(pay_buttons) == 4
+        "Доступны оба способа + копирование номера + Шаг назад + Отменить",
+        len(pay_buttons) == 5
         and any("чек" in b.text for b in pay_buttons)
         and any("на месте" in b.text for b in pay_buttons)
+        and any(getattr(b, "copy_text", None) is not None for b in pay_buttons)
         and any("Шаг назад" in b.text for b in pay_buttons),
     )
 
@@ -1324,7 +1345,7 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
         db,
         cfg,
     )
-    edits = [p for n, p in bot.since(mark) if n in ("EditMessageText", "SendMessage")]
+    edits = [p for n, p in bot.since(mark) if n in ("EditMessageMedia", "SendPhoto", "SendMessage")]
     list_text = text_of(edits[-1])
     check("Список активных броней отрисован", "АКТИВНЫЕ БРОНИ" in list_text)
     check("В списке видны номера заявок", "№" in list_text)
@@ -1412,7 +1433,7 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
     check("При отклонении сказано, что бронь не подтверждена", "не смогли подтвердить" in rejected_text)
     check(
         "Сообщение админа со списком перерисовано",
-        any(n == "EditMessageText" for n, _ in bot.since(mark)),
+        any(n in ("EditMessageMedia", "SendPhoto") for n, _ in bot.since(mark)),
     )
 
     # --- админ: панель сводки (и кнопкой меню, и /admin) --------------------- #
@@ -1432,7 +1453,11 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
     check("Статистика показывает число клиентов", "Клиентов" in stats_text)
     check(
         "Панель содержит кнопку «📋 Активные брони» и «◀ Назад»",
-        any(b.text == "📋 Активные брони" for row in markup_of(stats_payload).inline_keyboard for b in row)
+        any(
+            b.text.startswith("📋 Активные брони")
+            for row in markup_of(stats_payload).inline_keyboard
+            for b in row
+        )
         and any(b.text == "◀ Назад" for row in markup_of(stats_payload).inline_keyboard for b in row),
     )
 
@@ -1443,7 +1468,7 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
         db,
         cfg,
     )
-    check("Кнопка обновления статистики работает", any(n == "EditMessageText" for n, _ in bot.since(mark)))
+    check("Кнопка обновления статистики работает", any(n == "EditMessageMedia" for n, _ in bot.since(mark)))
 
     await state.storage.close()
     await admin_state.storage.close()
@@ -1469,7 +1494,7 @@ async def test_cancel_and_outdated(db: Database, cfg: AppConfig) -> None:
     check("Клиенту сообщено об отмене и показано меню", texts.BOOKING_CANCELED in text_of(cancel_payload))
     check(
         "После отмены показаны inline-кнопки главного меню",
-        markup_of(cancel_payload).inline_keyboard[0][0].text == "🖥 Залы и цены",
+        markup_of(cancel_payload).inline_keyboard[0][0].text == "🎮 Забронировать место",
     )
 
     mark = bot.mark()
@@ -1479,7 +1504,7 @@ async def test_cancel_and_outdated(db: Database, cfg: AppConfig) -> None:
     check(
         "/cancel без активного бронирования отвечает на том же экране",
         any(texts.BOOKING_NOT_STARTED in t for t in bot.step_texts(mark))
-        and any(n == "EditMessageText" for n, _ in bot.since(mark)),
+        and any(n == "EditMessageMedia" for n, _ in bot.since(mark)),
     )
 
     await state.set_state(BookingFSM.choosing_time)
@@ -1490,7 +1515,7 @@ async def test_cancel_and_outdated(db: Database, cfg: AppConfig) -> None:
         db,
         cfg,
     )
-    check("Кнопка «Отменить» перерисовывает экран в меню", any(n == "EditMessageText" for n, _ in bot.since(mark)))
+    check("Кнопка «Отменить» перерисовывает экран в меню", any(n == "EditMessageMedia" for n, _ in bot.since(mark)))
     check("После кнопки отмены состояние сброшено", (await state.get_state()) is None)
 
     mark = bot.mark()
@@ -1537,7 +1562,9 @@ async def test_cancel_and_outdated(db: Database, cfg: AppConfig) -> None:
             db,
             cfg,
         )
-        assert not [p for n, p in bot.since(m) if n == "SendMessage"], "лишний SendMessage при навигации"
+        assert not [
+            p for n, p in bot.since(m) if n in ("SendMessage", "SendPhoto")
+        ], "лишнее новое сообщение при навигации"
         return bot.step_texts(m)[-1]
 
     price_text = await go(Screen.PRICES)
@@ -1653,12 +1680,18 @@ async def test_cancel_and_outdated(db: Database, cfg: AppConfig) -> None:
 # 8. Деградация: Telegram не дал отредактировать сообщение
 # --------------------------------------------------------------------------- #
 class NoEditBot(BotSpy):
-    """«Бот», у которого правка сообщений всегда заканчивается ошибкой Telegram."""
+    """«Бот», у которого правка сообщений и медиа всегда заканчивается ошибкой Telegram."""
 
     async def edit_message_text(self, **kwargs: Any) -> None:
         raise TelegramBadRequest(
             EditMessageText(chat_id=1, message_id=1, text="x"),
             "Bad Request: message can't be edited",
+        )
+
+    async def edit_message_media(self, **kwargs: Any) -> Any:
+        raise TelegramBadRequest(
+            EditMessageText(chat_id=1, message_id=1, text="x"),
+            "Bad Request: message to edit not found",
         )
 
 
@@ -2600,11 +2633,16 @@ async def test_multi_admin(db: Database) -> None:
     ][-1]
     admin_menu_btns = [b.text for row in markup_of(admin_menu_payload).inline_keyboard for b in row]
     check("У администратора в меню есть кнопка «🛠 Админ-панель»", "🛠 Админ-панель" in admin_menu_btns)
-    check(
-        "Администратору /start показывает служебную подсказку",
-        any("Вы — администратор бота" in t for t in greeting),
+    check_equal(
+        "Администратору /start отправляет ровно один фото-экран без второго сообщения",
+        len(panel_bot.new_messages(mark)),
+        1,
     )
-    check("В подсказке названа роль", any("администратор" in t for t in greeting))
+    check(
+        "В подписи меню администратора отмечен активный доступ",
+        any("Доступ администратора активен" in t for t in greeting),
+    )
+    check("В подписи меню названа роль", any("администратор" in t for t in greeting))
 
     mark = panel_bot.mark()
     client_state = make_fsm_context(MULTI_CLIENT_ID)
@@ -2627,8 +2665,8 @@ async def test_multi_admin(db: Database) -> None:
     guest_menu_btns = [b.text for row in markup_of(guest_menu_payload).inline_keyboard for b in row]
     check("У обычного гостя кнопки «🛠 Админ-панель» нет", "🛠 Админ-панель" not in guest_menu_btns)
     check(
-        "Клиенту служебная подсказка администратора не показывается",
-        not any("Вы — администратор бота" in t for t in panel_bot.step_texts(mark)),
+        "Клиенту пометка администратора не показывается",
+        not any("Доступ администратора активен" in t for t in panel_bot.step_texts(mark)),
     )
 
     # --- команды панели без прав --------------------------------------------- #
@@ -2822,10 +2860,12 @@ async def test_single_screen_hud(db: Database, dispatcher: Dispatcher) -> None:
         await dispatcher.feed_update(bot, make_update(seq, event))
         return mark
 
-    # 1. /start создаёт ровно одно сообщение-экран
+    # 1. /start создаёт ровно одно фото-сообщение экрана
     m = await send(make_message(user_id=guest_id, bot=bot, text="/start"))
-    created = [p for n, p in bot.since(m) if n == "SendMessage"]
-    check_equal("HUD: /start отправляет ровно одно сообщение", len(created), 1)
+    created_photos = [p for n, p in bot.since(m) if n == "SendPhoto"]
+    created_texts = [p for n, p in bot.since(m) if n == "SendMessage"]
+    check_equal("HUD: /start отправляет ровно один фото-экран", len(created_photos), 1)
+    check_equal("HUD: /start не шлёт лишних текстовых сообщений", len(created_texts), 0)
     screen_msg_id = bot._message_ids
 
     def cb(data: str, uid: int = guest_id, mid: int = screen_msg_id) -> CallbackQuery:
@@ -2838,7 +2878,7 @@ async def test_single_screen_hud(db: Database, dispatcher: Dispatcher) -> None:
             data=data,
         ).as_(bot)
 
-    # 2. 10 переходов подряд → 0 новых SendMessage, 10 EditMessageText того же id
+    # 2. 12 переходов подряд (включая вкладки «Правил») → 0 новых сообщений, 12 EditMessageMedia
     walk = [
         nav(Screen.PRICES),
         nav(Screen.FAQ),
@@ -2848,30 +2888,43 @@ async def test_single_screen_hud(db: Database, dispatcher: Dispatcher) -> None:
         nav(SCREEN_BACK),
         nav(Screen.CONTACTS),
         nav(Screen.RULES),
-        nav(Screen.BOOKINGS),
+        nav(Screen.RULES, "pay"),
+        nav(Screen.RULES, "club"),
+        nav(SCREEN_BACK),
         nav(Screen.MENU),
     ]
     mark = bot.mark()
     for step in walk:
         await send(cb(step))
-    sends_during_walk = [p for n, p in bot.since(mark) if n == "SendMessage"]
-    edits_during_walk = [p for n, p in bot.since(mark) if n == "EditMessageText"]
-    check_equal("HUD: за 10 переходов 0 новых сообщений в чате", len(sends_during_walk), 0)
-    check_equal("HUD: все 10 переходов обновили тот же экран", len(edits_during_walk), 10)
+    sends_during_walk = [p for n, p in bot.since(mark) if n in ("SendMessage", "SendPhoto")]
+    edits_during_walk = [p for n, p in bot.since(mark) if n == "EditMessageMedia"]
+    check_equal("HUD: за 12 переходов 0 новых сообщений в чате", len(sends_during_walk), 0)
+    check_equal("HUD: все 12 переходов обновили тот же медиа-экран", len(edits_during_walk), 12)
     check(
         "HUD: правился один и тот же message_id",
         {p.message_id for p in edits_during_walk} == {screen_msg_id},
     )
+    # Повторный вход в главное меню использует кэшированный file_id, а не байты
+    check(
+        "HUD: повторный показ карточки берёт закэшированный file_id",
+        isinstance(edits_during_walk[-1].media.media, str)
+        and edits_during_walk[-1].media.media.startswith("AgAC_card_"),
+    )
 
     # 3. Все заголовки экранов покрыты
-    check("HUD: у каждого экрана есть заголовок", len(SCREEN_TITLES) >= 18)
+    check("HUD: у каждого экрана есть заголовок", len(SCREEN_TITLES) >= 20)
 
-    # 4. У гостя в меню нет админки, у администратора — есть, и она открывает панель
+    # 4. У гостя в меню нет админки, у администратора — есть (и без второго сообщения!)
     guest_last = edits_during_walk[-1]
     guest_btns = [b.text for r in markup_of(guest_last).inline_keyboard for b in r]
     check("HUD: гость не видит кнопку админ-панели", "🛠 Админ-панель" not in guest_btns)
 
     m = await send(make_message(user_id=ADMIN_ID, bot=bot, text="/start", username="hud_owner", first_name="Владелец"))
+    check_equal(
+        "HUD: админ при /start получает ровно 1 сообщение (без спама ниже меню)",
+        len([p for n, p in bot.since(m) if n in ("SendMessage", "SendPhoto")]),
+        1,
+    )
     admin_screen = [p for p in bot.step_payloads(m) if getattr(markup_of(p), "inline_keyboard", None)][-1]
     admin_mid = getattr(admin_screen, "message_id", None) or bot._message_ids
     admin_btns = [b.text for r in markup_of(admin_screen).inline_keyboard for b in r]
@@ -2971,6 +3024,108 @@ async def test_migration() -> None:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+async def test_graphical_cards(db: Database, cfg: AppConfig) -> None:
+    """Проверить графические карточки (1280×720), отсутствие <pre> и лимит 1024."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    from bot.ui.render import CAPTION_LIMIT, ViewContext, render_screen
+    from bot.ui.screens import Screen
+    from bot.utils.formatting import truncate_html, visible_length
+
+    print("\n— Графические карточки (Pillow 1280×720), типографика и лимит 1024 —")
+    bot = BotSpy()
+    state = make_fsm_context(ADMIN_ID)
+    await state.update_data(
+        **{
+            DATA_TARIFF_KEY: "svip",
+            DATA_TIME_KEY: "night",
+            DATA_TIME_SLOT: "На ночь (22:00–08:00)",
+            DATA_CLIENT_NAME: "Александр",
+        }
+    )
+    sample_booking = await db.add_booking(
+        ADMIN_ID, "S VIP", "На ночь (22:00–08:00)", "Александр", "AgAC_ticket_demo"
+    )
+    ctx = ViewContext(
+        db=db,
+        cfg=cfg,
+        bot=bot,
+        user_id=ADMIN_ID,
+        state=state,
+        admins=AdminRegistry(db, cfg),
+    )
+
+    screens_to_check: list[tuple[str, str]] = [
+        (Screen.MENU, ""),
+        (Screen.PRICES, ""),
+        (Screen.RULES, "main"),
+        (Screen.RULES, "pay"),
+        (Screen.RULES, "club"),
+        (Screen.FAQ, ""),
+        *[(Screen.FAQ_ITEM, item.key) for item in texts.FAQ_ITEMS],
+        (Screen.CONTACTS, ""),
+        (Screen.BOOKINGS, ""),
+        (Screen.BOOK_TARIFF, ""),
+        (Screen.BOOK_TIME, ""),
+        (Screen.BOOK_TIME_TEXT, ""),
+        (Screen.BOOK_NAME, ""),
+        (Screen.BOOK_PAY, ""),
+        (Screen.BOOK_RECEIPT, ""),
+        (Screen.BOOK_DONE, str(sample_booking.id)),
+        (Screen.CONSENT, ""),
+        (Screen.PRIVACY, ""),
+        (Screen.PRIVACY_CONFIRM, ""),
+        (Screen.CONSENT_REVOKED, "24.10.2026 12:00"),
+        (Screen.ADMIN, ""),
+        (Screen.ADMIN_PENDING, "0"),
+        (Screen.ADMIN_ADMINS, ""),
+        (Screen.ADMIN_ADMIN, str(ADMIN_ID)),
+        (Screen.ADMIN_ADD, ""),
+    ]
+
+    for scr, arg in screens_to_check:
+        label = f"{scr}:{arg}" if arg else scr
+        view = await render_screen(ctx, scr, arg)
+        with Image.open(BytesIO(view.card.jpeg_bytes)) as img:
+            size_ok = img.size == (1280, 720) and img.mode == "RGB"
+        vis_len = visible_length(view.caption)
+        no_pre = "<pre>" not in view.caption and "</pre>" not in view.caption
+        no_meta = "он откроется здесь же" not in view.caption
+        check(
+            f"Экран [{label}]: JPEG 1280×720, без <pre>, подпись {vis_len} ≤ {CAPTION_LIMIT}",
+            size_ok and no_pre and no_meta and 0 < vis_len <= CAPTION_LIMIT,
+            f"size_ok={size_ok}, no_pre={no_pre}, vis_len={vis_len}",
+        )
+
+    # Проверка безопасной обрезки HTML с закрытием тегов
+    long_html = "<blockquote><b>Заголовок</b> — " + ("текст &amp; символы " * 80) + "</blockquote>"
+    cut = truncate_html(long_html, 120)
+    check(
+        "truncate_html укладывается в лимит и закрывает HTML-теги",
+        visible_length(cut) <= 120
+        and cut.endswith("</blockquote>")
+        and cut.count("<blockquote>") == cut.count("</blockquote>"),
+    )
+
+    # Проверка цветных стилей и CopyTextButton
+    menu_view = await render_screen(ctx, Screen.MENU, "")
+    hero_btn = menu_view.reply_markup.inline_keyboard[0][0]
+    check_equal("Главная CTA-кнопка меню окрашена в primary", hero_btn.style, "primary")
+
+    contacts_view = await render_screen(ctx, Screen.CONTACTS, "")
+    copy_btns = [
+        b
+        for row in contacts_view.reply_markup.inline_keyboard
+        for b in row
+        if getattr(b, "copy_text", None) is not None
+    ]
+    check("На экране контактов есть кнопки копирования реквизитов и телефона", len(copy_btns) == 2)
+
+    await state.storage.close()
+
+
 # --------------------------------------------------------------------------- #
 # Запуск
 # --------------------------------------------------------------------------- #
@@ -3009,6 +3164,7 @@ async def run_all() -> int:
 
         await test_multi_admin(db)
         await test_payment_choice(db, cfg)
+        await test_graphical_cards(db, cfg)
         await test_migration()
     finally:
         await db.close()

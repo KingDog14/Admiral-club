@@ -1,18 +1,20 @@
-"""Содержимое экранов: текст с HUD-шапкой и inline-клавиатура.
+"""Сборка экранов: графическая карточка + подпись + inline-клавиатура.
 
-Каждый экран — отдельная функция ``_render_<screen>(ctx, arg)``, которая читает
-базу и FSM-данные и возвращает ``(текст, клавиатура)``. Здесь нет ни одного
-вызова Telegram API: что показывать и как править сообщение, решает
-:mod:`bot.ui.navigator`.
+Каждый экран возвращает :class:`ScreenView`:
 
-Контекст :class:`ViewContext` собирается один раз на апдейт и передаётся в
-рендереры, поэтому у всех них одинаковые, предсказуемые зависимости.
+* ``card``         — HD-карточка 1280×720 (:class:`bot.ui.cards.RenderedCard`);
+* ``caption``      — компактная HTML-подпись (до 1024 символов, без ``<pre>``);
+* ``reply_markup`` — inline-клавиатура с цветными акцентами и ``CopyTextButton``.
+
+В этом модуле нет вызовов Telegram API — отправку и редактирование на месте
+выполняет :class:`bot.ui.navigator.Navigator`.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+import re
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -28,8 +30,10 @@ from bot.db.database import Database
 from bot.db.models import AdminRole, BookingStatus
 from bot.keyboards.inline import (
     CB_ADMIN_ADD,
+    CB_ADMIN_ADD_CANCEL,
     CB_BOOKING_BACK,
     CB_BOOKING_CANCEL,
+    CB_CONSENT_REVOKE,
     CB_PAY_CHECK,
     CB_PAY_SPOT,
     CB_TARIFF_PREFIX,
@@ -41,43 +45,84 @@ from bot.keyboards.inline import (
     admin_promote_callback,
     admin_reject_callback,
     admin_toggle_callback,
+    consent_keyboard,
+    revoke_confirm_keyboard,
 )
 from bot.services.admins import AdminRegistry
 from bot.states import DATA_CLIENT_NAME, DATA_TARIFF_KEY, DATA_TIME_KEY, DATA_TIME_SLOT
+from bot.ui.cards import (
+    COL_CYAN,
+    COL_GOLD,
+    COL_GREEN,
+    COL_RED,
+    RenderedCard,
+    clean_card_text,
+    render_admin_dashboard_card,
+    render_admin_pending_card,
+    render_admin_team_card,
+    render_bookings_list_card,
+    render_contacts_card,
+    render_info_card,
+    render_menu_card,
+    render_prices_card,
+    render_ticket_card,
+    render_wizard_card,
+)
 from bot.ui.screens import (
     BTN_BACK,
+    BTN_BOOK_HERO,
     BTN_CANCEL,
+    BTN_HOME,
     BTN_REFRESH,
     BTN_STEP_BACK,
     SCREEN_BACK,
+    ButtonSpec,
     Screen,
+    btn,
     faq_answer_keyboard,
     faq_list_keyboard,
     footer_rows,
-    hud,
     keyboard,
     menu_keyboard,
     nav,
-    pre,
+    rules_tabs_keyboard,
     section,
     status_tag,
-    table,
 )
-from bot.utils.formatting import escape_html, format_datetime, now_text, today_date_text, truncate
+from bot.utils.formatting import (
+    escape_html,
+    format_datetime,
+    now_full_text,
+    now_text,
+    today_date_text,
+    truncate_html,
+)
 
 logger = logging.getLogger(__name__)
 
-#: Ограничение Telegram на длину текста сообщения.
-MESSAGE_LIMIT: int = 4096
+#: Жёсткий лимит Telegram на длину подписи к фото/медиа.
+CAPTION_LIMIT: int = 1024
+#: Совместимость со старым именем константы.
+MESSAGE_LIMIT: int = CAPTION_LIMIT
 
-#: Кнопка «шаг назад» в мастере бронирования.
-Button = tuple[str, str]
-Row = Sequence[Button]
+
+@dataclass(frozen=True, slots=True)
+class ScreenView:
+    """Полное представление экрана: карточка, подпись и клавиатура."""
+
+    card: RenderedCard
+    caption: str
+    reply_markup: InlineKeyboardMarkup
+
+    def __iter__(self) -> Iterator[Any]:
+        """Совместимость с распаковкой ``caption, markup = view``."""
+        yield self.caption
+        yield self.reply_markup
 
 
 @dataclass(slots=True)
 class ViewContext:
-    """Всё, что нужно рендереру экрана: база, конфиг, бот и кто смотрит."""
+    """Зависимости рендерера экрана: база, конфиг, бот и текущий пользователь."""
 
     db: Database
     cfg: AppConfig
@@ -89,26 +134,19 @@ class ViewContext:
 
 
 # --------------------------------------------------------------------------- #
-# Мелкие helpers
+# Вспомогательные функции
 # --------------------------------------------------------------------------- #
-def _subtitle(club: Any) -> str:
-    """Вторая строка рамки: «ЧИТА · 24/7» (или просто город)."""
-    city = str(club.city).upper()
-    return f"{city} · 24/7" if "24" in str(club.hours) else city
-
-
-def _header(screen: str, club: Any, extra: str = "") -> str:
-    """Шапка экрана: рамка клуба + заголовок раздела."""
-    return "\n".join([hud(f"▚▚ {club.name} ▚▚", _subtitle(club)), "", section(screen, extra)])
-
-
 def _compose(screen: str, club: Any, body: str, extra: str = "") -> str:
-    """Готовый текст экрана: шапка, пустая строка, содержимое."""
-    return truncate(f"{_header(screen, club, extra)}\n\n{body}", MESSAGE_LIMIT)
+    """Собрать аккуратную подпись под карточкой в пределах 1024 символов."""
+    header = section(screen, club.name, extra=extra)
+    return truncate_html(f"{header}\n\n{body}", CAPTION_LIMIT)
+
+
+def _strip_html(text: str) -> str:
+    return clean_card_text(re.sub(r"<[^>]+>", "", text))
 
 
 async def _is_admin(ctx: ViewContext) -> bool:
-    """Есть ли у смотрящего права администратора."""
     if ctx.admins is not None:
         return await ctx.admins.is_admin(ctx.user_id)
     if await ctx.db.is_active_admin(ctx.user_id):
@@ -119,8 +157,18 @@ async def _is_admin(ctx: ViewContext) -> bool:
     return False
 
 
+async def _admin_role_title(ctx: ViewContext) -> str | None:
+    if not await _is_admin(ctx):
+        return None
+    record = await ctx.db.get_admin(ctx.user_id)
+    if record is not None:
+        return record.role_title
+    if ctx.user_id == ctx.cfg.admin_id:
+        return AdminRole.title(AdminRole.OWNER)
+    return AdminRole.title(AdminRole.OPERATOR)
+
+
 async def _is_owner(ctx: ViewContext) -> bool:
-    """Может ли смотрящий управлять списком администраторов."""
     if ctx.admins is not None:
         return await ctx.admins.is_owner(ctx.user_id)
     admin = await ctx.db.get_admin(ctx.user_id)
@@ -131,45 +179,45 @@ async def _is_owner(ctx: ViewContext) -> bool:
 
 
 async def _fsm(ctx: ViewContext) -> dict[str, Any]:
-    """Данные мастера бронирования (пустой словарь, если состояния нет)."""
     if ctx.state is None:
         return {}
     return await ctx.state.get_data()
 
 
-def _with_step_nav(*rows: Row) -> InlineKeyboardMarkup:
-    """Клавиатура шага бронирования: содержимое + «Шаг назад» / «Отменить»."""
-    prepared: list[list[Button]] = [[(str(t), str(d)) for t, d in row] for row in rows]
-    prepared.append([(BTN_STEP_BACK, CB_BOOKING_BACK), (BTN_CANCEL, CB_BOOKING_CANCEL)])
+def _with_step_nav(*rows: Sequence[ButtonSpec]) -> InlineKeyboardMarkup:
+    """Клавиатура шага мастера: кнопки шага + «‹ Шаг назад» и «✕ Отменить»."""
+    prepared: list[Sequence[ButtonSpec]] = list(rows)
+    prepared.append([(BTN_STEP_BACK, CB_BOOKING_BACK), (BTN_CANCEL, CB_BOOKING_CANCEL, "danger")])
     return keyboard(*prepared)
 
 
-def _pairs(rows: Row, per_row: int = 2) -> list[list[Button]]:
-    """Разложить кнопки по несколько в строке."""
-    flat = [(str(t), str(d)) for t, d in rows]
+def _pairs(items: Sequence[ButtonSpec], per_row: int = 2) -> list[list[ButtonSpec]]:
+    flat = list(items)
     return [flat[i : i + per_row] for i in range(0, len(flat), per_row)]
 
 
 # --------------------------------------------------------------------------- #
 # Клиентские экраны
 # --------------------------------------------------------------------------- #
-async def _render_menu(ctx: ViewContext, _arg: str) -> tuple[str, InlineKeyboardMarkup]:
-    body = texts.render(texts.SCREEN_MENU_BODY, ctx.cfg.club)
-    return _compose(Screen.MENU, ctx.cfg.club, body), menu_keyboard(await _is_admin(ctx))
-
-
-async def _render_prices(ctx: ViewContext, _arg: str) -> tuple[str, InlineKeyboardMarkup]:
+async def _render_menu(ctx: ViewContext, _arg: str) -> ScreenView:
     club = ctx.cfg.club
-    hourly = table(
-        ("ЗАЛ", "1Ч", "3Ч", "5Ч"),
-        [(t.title, t.hour1, t.hour3, t.hour5) for t in texts.TARIFFS],
+    role_title = await _admin_role_title(ctx)
+    is_admin = role_title is not None
+    card = render_menu_card(club, is_admin=is_admin, role_title=role_title)
+    body = texts.render(texts.SCREEN_MENU_BODY, club)
+    if is_admin:
+        body += f"\n🛡 Доступ администратора активен (<b>{escape_html(role_title)}</b>)."
+    return ScreenView(
+        card=card,
+        caption=_compose(Screen.MENU, club, body),
+        reply_markup=menu_keyboard(is_admin),
     )
-    packs = table(
-        ("ЗАЛ", "УТРО", "ДЕНЬ", "НОЧЬ"),
-        [(t.title, t.morning, t.day, t.night) for t in texts.TARIFFS],
-    )
-    night_weekend = " · ".join(f"{t.night_weekend} ₽" for t in texts.TARIFFS)
-    body = "\n".join(
+
+
+async def _render_prices(ctx: ViewContext, _arg: str) -> ScreenView:
+    club = ctx.cfg.club
+    night_weekend = " · ".join(f"{t.title} {t.night_weekend} ₽" for t in texts.TARIFFS)
+    body = "\n\n".join(
         [
             texts.render(
                 texts.SCREEN_PRICES_BODY,
@@ -178,55 +226,157 @@ async def _render_prices(ctx: ViewContext, _arg: str) -> tuple[str, InlineKeyboa
                 day_slot=texts.DAY_SLOT,
                 night_slot=texts.NIGHT_SLOT,
             ),
-            "",
-            pre(hourly),
-            "",
-            pre(packs),
-            "",
             texts.render(texts.SCREEN_PRICES_NOTE, club, night_weekend=night_weekend),
         ]
     )
-    return (
-        _compose(Screen.PRICES, club, body),
-        footer_rows([("🎮 Забронировать", nav(Screen.BOOK_TARIFF)), ("❓ FAQ", nav(Screen.FAQ))]),
-    )
-
-
-async def _render_rules(ctx: ViewContext, _arg: str) -> tuple[str, InlineKeyboardMarkup]:
-    return (
-        _compose(Screen.RULES, ctx.cfg.club, texts.build_rules_body(ctx.cfg.club)),
-        footer_rows([("🎮 Забронировать", nav(Screen.BOOK_TARIFF))]),
-    )
-
-
-async def _render_faq_list(ctx: ViewContext, _arg: str) -> tuple[str, InlineKeyboardMarkup]:
-    body = "Выберите вопрос — ответ откроется здесь же, в этом сообщении."
-    return _compose(Screen.FAQ, ctx.cfg.club, body), faq_list_keyboard()
-
-
-async def _render_faq_item(ctx: ViewContext, arg: str) -> tuple[str, InlineKeyboardMarkup]:
-    item = texts.FAQ_BY_KEY.get(arg)
-    if item is None:  # вопрос пропал из списка — возвращаем к списку
-        return await _render_faq_list(ctx, "")
-    body = f"<b>{escape_html(item.question)}</b>\n\n{texts.faq_answer(item, ctx.cfg.club)}"
-    return _compose(Screen.FAQ_ITEM, ctx.cfg.club, body), faq_answer_keyboard()
-
-
-async def _render_contacts(ctx: ViewContext, _arg: str) -> tuple[str, InlineKeyboardMarkup]:
-    club = ctx.cfg.club
-    return (
-        _compose(Screen.CONTACTS, club, texts.build_contacts_body(club)),
-        footer_rows(
-            [
-                ("🎮 Забронировать", nav(Screen.BOOK_TARIFF)),
-                ("🖥 Залы и цены", nav(Screen.PRICES)),
-            ]
+    return ScreenView(
+        card=render_prices_card(club),
+        caption=_compose(Screen.PRICES, club, body),
+        reply_markup=footer_rows(
+            [(BTN_BOOK_HERO, nav(Screen.BOOK_TARIFF), "primary")],
+            [("❓ Частые вопросы", nav(Screen.FAQ)), ("📜 Правила", nav(Screen.RULES))],
         ),
     )
 
 
-async def _render_bookings(ctx: ViewContext, _arg: str) -> tuple[str, InlineKeyboardMarkup]:
-    bookings = await ctx.db.list_user_bookings(ctx.user_id, limit=10)
+async def _render_rules(ctx: ViewContext, arg: str) -> ScreenView:
+    club = ctx.cfg.club
+    tab = arg if arg in (texts.RULES_TAB_MAIN, texts.RULES_TAB_PAY, texts.RULES_TAB_CLUB) else texts.RULES_TAB_MAIN
+
+    if tab == texts.RULES_TAB_PAY:
+        extra = "оплата и безопасность"
+        template = texts.SCREEN_RULES_PAY
+        card = render_info_card(
+            club,
+            cache_tag="rules_pay",
+            badge="ПРАВИЛА · ОПЛАТА",
+            title="Оплата и защита от мошенников",
+            subtitle=f"Единый номер клуба: {club.payment_system} {club.payment_card} ({club.payment_holder})",
+            highlights=[
+                ("Предоплата", "Берётся только на ночные пакеты и только в ПТ–ВС."),
+                ("Оплата на месте", "В будни и на утренних/дневных пакетах платите при входе."),
+                ("Только общая группа", "Администраторы никогда не просят перевод в личке."),
+                ("Проверка по звонку", f"Любые сомнения — звоните в клуб: {club.admin_phone}."),
+            ],
+            accent=COL_GOLD,
+        )
+    elif tab == texts.RULES_TAB_CLUB:
+        extra = "порядок в зале"
+        template = texts.SCREEN_RULES_CLUB
+        card = render_info_card(
+            club,
+            cache_tag="rules_club",
+            badge="ПРАВИЛА · ЗАЛ",
+            title="Порядок в клубе и техника",
+            subtitle="Комфортная атмосфера и исправное железо для каждого гостя",
+            highlights=[
+                ("Чистая зона", "Без алкоголя, курения, вейпов, электронных сигарет и агрессии."),
+                ("Настройки ПК", "Стороннее ПО и подключение флешек — только через админа."),
+                ("Ваши аккаунты", "Не забывайте выходить из Steam и FACEIT в конце сессии."),
+                ("Оборудование", "При любом сбое сразу позовите администратора смены."),
+            ],
+            accent=COL_CYAN,
+        )
+    else:
+        extra = "основное"
+        template = texts.SCREEN_RULES_MAIN
+        card = render_info_card(
+            club,
+            cache_tag="rules_main",
+            badge="ПРАВИЛА КЛУБА",
+            title="Правила посещения и брони",
+            subtitle=f"г. {club.city}, {club.address} · работаем {club.hours}",
+            highlights=[
+                ("Подтверждение", "Заявка подтверждается администратором за 1–2 минуты."),
+                ("Ожидание 15 минут", "При опоздании более 15 минут бронь может быть снята."),
+                ("Отмена и возврат", "Не позднее чем за 1 час до начала; снять гостя можно на входе."),
+                ("Ночной пакет 18+", f"Ночь ({texts.NIGHT_SLOT}) до 18 лет — только с согласия родителей."),
+            ],
+            accent=COL_CYAN,
+        )
+
+    body = texts.render(
+        template,
+        club,
+        night_slot=texts.NIGHT_SLOT,
+        morning_slot=texts.MORNING_SLOT,
+        day_slot=texts.DAY_SLOT,
+    )
+    return ScreenView(
+        card=card,
+        caption=_compose(Screen.RULES, club, body, extra=extra),
+        reply_markup=rules_tabs_keyboard(tab),
+    )
+
+
+async def _render_faq_list(ctx: ViewContext, _arg: str) -> ScreenView:
+    club = ctx.cfg.club
+    card = render_info_card(
+        club,
+        cache_tag="faq_list",
+        badge="FAQ · ВОПРОСЫ И ОТВЕТЫ",
+        title="Частые вопросы гостей",
+        subtitle="Собрали короткие и точные ответы по работе клуба ADMIRAL",
+        highlights=[
+            ("Ночной пакет", f"С {texts.NIGHT_SLOT}, оплачивается целиком за ночь."),
+            ("Предоплата", "Нужна только на ночь в ПТ–ВС; в остальные дни — на месте."),
+            ("Единый номер", f"{club.payment_system} {club.payment_card} ({club.payment_holder})."),
+            ("FACEIT и залы", "FACEIT работает во всех 4 залах клуба."),
+        ],
+        accent=COL_CYAN,
+    )
+    body = "Выберите вопрос в списке кнопок ниже:"
+    return ScreenView(
+        card=card,
+        caption=_compose(Screen.FAQ, club, body),
+        reply_markup=faq_list_keyboard(),
+    )
+
+
+async def _render_faq_item(ctx: ViewContext, arg: str) -> ScreenView:
+    item = texts.FAQ_BY_KEY.get(arg)
+    if item is None:
+        return await _render_faq_list(ctx, "")
+    club = ctx.cfg.club
+    answer_html = texts.faq_answer(item, club)
+    card = render_info_card(
+        club,
+        cache_tag=f"faq_{item.key}",
+        badge="ОТВЕТ НА ВОПРОС",
+        title=item.question,
+        subtitle=f"Клуб {club.place} · {club.hours}",
+        highlights=[
+            ("Ответ клуба", _strip_html(answer_html)),
+            ("Связь с админом", f"{club.admin_phone} ({club.admin_name})"),
+        ],
+        accent=COL_CYAN,
+    )
+    body = f"<b>{item.emoji} {escape_html(item.question)}</b>\n\n<blockquote>{answer_html}</blockquote>"
+    return ScreenView(
+        card=card,
+        caption=_compose(Screen.FAQ_ITEM, club, body),
+        reply_markup=faq_answer_keyboard(),
+    )
+
+
+async def _render_contacts(ctx: ViewContext, _arg: str) -> ScreenView:
+    club = ctx.cfg.club
+    return ScreenView(
+        card=render_contacts_card(club),
+        caption=_compose(Screen.CONTACTS, club, texts.render(texts.SCREEN_CONTACTS_CARD_BODY, club)),
+        reply_markup=footer_rows(
+            [
+                btn("📋 Номер Сбербанка", copy_value=club.payment_card),
+                btn("📞 Телефон клуба", copy_value=club.admin_phone),
+            ],
+            [(BTN_BOOK_HERO, nav(Screen.BOOK_TARIFF), "primary"), ("🖥 Залы и цены", nav(Screen.PRICES))],
+        ),
+    )
+
+
+async def _render_bookings(ctx: ViewContext, _arg: str) -> ScreenView:
+    club = ctx.cfg.club
+    bookings = await ctx.db.list_user_bookings(ctx.user_id, limit=6)
     if not bookings:
         body = texts.SCREEN_BOOKINGS_EMPTY
     else:
@@ -240,16 +390,23 @@ async def _render_bookings(ctx: ViewContext, _arg: str) -> tuple[str, InlineKeyb
             )
             for booking in bookings
         )
-    return (
-        _compose(Screen.BOOKINGS, ctx.cfg.club, body),
-        footer_rows([("🎮 Забронировать", nav(Screen.BOOK_TARIFF))]),
+    return ScreenView(
+        card=render_bookings_list_card(club, bookings, ctx.cfg.timezone),
+        caption=_compose(Screen.BOOKINGS, club, body),
+        reply_markup=footer_rows(
+            [(BTN_BOOK_HERO, nav(Screen.BOOK_TARIFF), "primary"), (BTN_REFRESH, nav(Screen.BOOKINGS))],
+        ),
     )
 
 
-# --- мастер бронирования ---------------------------------------------------- #
-async def _render_book_tariff(ctx: ViewContext, _arg: str) -> tuple[str, InlineKeyboardMarkup]:
+# --------------------------------------------------------------------------- #
+# Мастер бронирования (4 шага)
+# --------------------------------------------------------------------------- #
+async def _render_book_tariff(ctx: ViewContext, _arg: str) -> ScreenView:
+    club = ctx.cfg.club
+    today = datetime.now(ctx.cfg.timezone).date()
     body = texts.render(
-        texts.SCREEN_BOOK_TARIFF_BODY, ctx.cfg.club, tariffs_overview=texts.build_tariffs_overview()
+        texts.SCREEN_BOOK_TARIFF_BODY, club, tariffs_overview=texts.build_tariffs_overview()
     )
     rows = _pairs(
         [
@@ -257,11 +414,16 @@ async def _render_book_tariff(ctx: ViewContext, _arg: str) -> tuple[str, InlineK
             for tariff in texts.TARIFFS
         ]
     )
-    rows.append([(BTN_BACK, CB_BOOKING_BACK), (BTN_CANCEL, CB_BOOKING_CANCEL)])
-    return _compose(Screen.BOOK_TARIFF, ctx.cfg.club, body), keyboard(*rows)
+    rows.append([(BTN_BACK, CB_BOOKING_BACK), (BTN_CANCEL, CB_BOOKING_CANCEL, "danger")])
+    return ScreenView(
+        card=render_wizard_card(club, step=1, step_label="Выбор зала", is_weekend_day=texts.is_weekend(today)),
+        caption=_compose(Screen.BOOK_TARIFF, club, body),
+        reply_markup=keyboard(*rows),
+    )
 
 
-async def _render_book_time(ctx: ViewContext, _arg: str) -> tuple[str, InlineKeyboardMarkup]:
+async def _render_book_time(ctx: ViewContext, _arg: str) -> ScreenView:
+    club = ctx.cfg.club
     data = await _fsm(ctx)
     tariff = texts.get_tariff(str(data.get(DATA_TARIFF_KEY) or ""))
     if tariff is None:
@@ -270,81 +432,157 @@ async def _render_book_time(ctx: ViewContext, _arg: str) -> tuple[str, InlineKey
     moment = datetime.now(ctx.cfg.timezone)
     body = texts.render(
         texts.SCREEN_BOOK_TIME_BODY,
-        ctx.cfg.club,
+        club,
         tariff=escape_html(tariff.title),
         now_time=now_text(ctx.cfg.timezone),
         now_date=today_date_text(ctx.cfg.timezone),
     )
     rows = _pairs([(label, f"{CB_TIME_PREFIX}{key}") for key, label in texts.TIME_CHOICES])
-    return (
-        _compose(Screen.BOOK_TIME, ctx.cfg.club, body, extra=moment.strftime("%H:%M")),
-        _with_step_nav(*rows),
+    return ScreenView(
+        card=render_wizard_card(
+            club,
+            step=2,
+            step_label="Время сессии",
+            tariff_key=tariff.key,
+            is_weekend_day=texts.is_weekend(moment.date()),
+        ),
+        caption=_compose(Screen.BOOK_TIME, club, body, extra=moment.strftime("%H:%M")),
+        reply_markup=_with_step_nav(*rows),
     )
 
 
-async def _render_book_time_text(ctx: ViewContext, _arg: str) -> tuple[str, InlineKeyboardMarkup]:
+async def _render_book_time_text(ctx: ViewContext, _arg: str) -> ScreenView:
+    club = ctx.cfg.club
     data = await _fsm(ctx)
     tariff = texts.get_tariff(str(data.get(DATA_TARIFF_KEY) or ""))
     body = texts.render(
         texts.SCREEN_BOOK_TIME_TEXT_BODY,
-        ctx.cfg.club,
+        club,
         tariff=escape_html(tariff.title) if tariff else "—",
     )
-    return _compose(Screen.BOOK_TIME_TEXT, ctx.cfg.club, body), _with_step_nav()
+    return ScreenView(
+        card=render_wizard_card(
+            club,
+            step=2,
+            step_label="Своё время сессии",
+            tariff_key=tariff.key if tariff else None,
+        ),
+        caption=_compose(Screen.BOOK_TIME_TEXT, club, body),
+        reply_markup=_with_step_nav(),
+    )
 
 
-async def _render_book_name(ctx: ViewContext, _arg: str) -> tuple[str, InlineKeyboardMarkup]:
+async def _render_book_name(ctx: ViewContext, _arg: str) -> ScreenView:
+    club = ctx.cfg.club
     data = await _fsm(ctx)
     tariff = texts.get_tariff(str(data.get(DATA_TARIFF_KEY) or ""))
+    time_slot = str(data.get(DATA_TIME_SLOT) or "—")
+    today = datetime.now(ctx.cfg.timezone).date()
+    amt = texts.amount_due(tariff.key if tariff else None, str(data.get(DATA_TIME_KEY) or ""), today)
+    amt_str = f"{amt} ₽" if amt is not None else f"от {tariff.hour1} ₽/ч" if tariff else None
+
     body = texts.render(
         texts.SCREEN_BOOK_NAME_BODY,
-        ctx.cfg.club,
+        club,
         tariff=escape_html(tariff.title) if tariff else "—",
-        time_slot=escape_html(str(data.get(DATA_TIME_SLOT) or "—")),
+        time_slot=escape_html(time_slot),
     )
-    return _compose(Screen.BOOK_NAME, ctx.cfg.club, body), _with_step_nav()
+    return ScreenView(
+        card=render_wizard_card(
+            club,
+            step=3,
+            step_label="Имя гостя",
+            tariff_key=tariff.key if tariff else None,
+            time_slot=time_slot,
+            amount_display=amt_str,
+        ),
+        caption=_compose(Screen.BOOK_NAME, club, body),
+        reply_markup=_with_step_nav(),
+    )
 
 
-async def _render_book_pay(ctx: ViewContext, _arg: str) -> tuple[str, InlineKeyboardMarkup]:
+async def _render_book_pay(ctx: ViewContext, _arg: str) -> ScreenView:
+    club = ctx.cfg.club
     data = await _fsm(ctx)
-    tariff = texts.get_tariff(str(data.get(DATA_TARIFF_KEY) or ""))
+    tariff_key = str(data.get(DATA_TARIFF_KEY) or "")
+    tariff = texts.get_tariff(tariff_key)
     time_key = str(data.get(DATA_TIME_KEY) or "")
+    time_slot = str(data.get(DATA_TIME_SLOT) or "—")
+    client_name = str(data.get(DATA_CLIENT_NAME) or "—")
     today = datetime.now(ctx.cfg.timezone).date()
     required = texts.prepayment_required(time_key, today)
 
+    amt_val = texts.amount_due(tariff_key, time_key, today)
+    amt_card = f"{amt_val} ₽" if amt_val is not None else (f"{tariff.hour1} ₽/ч (по прайсу)" if tariff else "По прайсу")
+
     body = texts.render(
         texts.SCREEN_BOOK_PAY_BODY,
-        ctx.cfg.club,
+        club,
         tariff=escape_html(tariff.title) if tariff else "—",
-        time_slot=escape_html(str(data.get(DATA_TIME_SLOT) or "—")),
-        client_name=escape_html(str(data.get(DATA_CLIENT_NAME) or "—")),
-        amount=texts.amount_text(str(data.get(DATA_TARIFF_KEY) or ""), time_key, today),
+        time_slot=escape_html(time_slot),
+        client_name=escape_html(client_name),
+        amount=texts.amount_text(tariff_key, time_key, today),
         payment_rules=texts.render(
             texts.PAYMENT_RULES_PREPAID if required else texts.PAYMENT_RULES_ON_SPOT,
-            ctx.cfg.club,
+            club,
         ),
     )
 
-    rows: list[list[Button]] = [[("📸 Оплатил — отправить чек", CB_PAY_CHECK)]]
+    rows: list[Sequence[ButtonSpec]] = [
+        [("📸 Оплатил — отправить чек", CB_PAY_CHECK, "primary")],
+    ]
     if not required:
         rows.append([("💵 Оплачу на месте", CB_PAY_SPOT)])
-    return _compose(Screen.BOOK_PAY, ctx.cfg.club, body), _with_step_nav(*rows)
+    rows.append([btn("📋 Скопировать номер перевода", copy_value=club.payment_card)])
+
+    return ScreenView(
+        card=render_wizard_card(
+            club,
+            step=4,
+            step_label="Способ оплаты",
+            tariff_key=tariff_key,
+            time_slot=time_slot,
+            client_name=client_name,
+            amount_display=amt_card,
+            prepay_required=required,
+        ),
+        caption=_compose(Screen.BOOK_PAY, club, body),
+        reply_markup=_with_step_nav(*rows),
+    )
 
 
-async def _render_book_receipt(ctx: ViewContext, _arg: str) -> tuple[str, InlineKeyboardMarkup]:
+async def _render_book_receipt(ctx: ViewContext, _arg: str) -> ScreenView:
+    club = ctx.cfg.club
     data = await _fsm(ctx)
+    tariff_key = str(data.get(DATA_TARIFF_KEY) or "")
+    tariff = texts.get_tariff(tariff_key)
+    time_key = str(data.get(DATA_TIME_KEY) or "")
     today = datetime.now(ctx.cfg.timezone).date()
+    amt_val = texts.amount_due(tariff_key, time_key, today)
+    amt_card = f"{amt_val} ₽" if amt_val is not None else (f"{tariff.hour1} ₽/ч" if tariff else "По прайсу")
+
     body = texts.render(
         texts.SCREEN_BOOK_RECEIPT_BODY,
-        ctx.cfg.club,
-        amount=texts.amount_text(
-            str(data.get(DATA_TARIFF_KEY) or ""), str(data.get(DATA_TIME_KEY) or ""), today
-        ),
+        club,
+        amount=texts.amount_text(tariff_key, time_key, today),
     )
-    return _compose(Screen.BOOK_RECEIPT, ctx.cfg.club, body), _with_step_nav()
+    return ScreenView(
+        card=render_wizard_card(
+            club,
+            step=4,
+            step_label="Ожидание чека",
+            tariff_key=tariff_key,
+            time_slot=str(data.get(DATA_TIME_SLOT) or "—"),
+            client_name=str(data.get(DATA_CLIENT_NAME) or "—"),
+            amount_display=amt_card,
+            waiting_receipt=True,
+        ),
+        caption=_compose(Screen.BOOK_RECEIPT, club, body),
+        reply_markup=_with_step_nav([btn("📋 Скопировать номер перевода", copy_value=club.payment_card)]),
+    )
 
 
-async def _render_book_done(ctx: ViewContext, arg: str) -> tuple[str, InlineKeyboardMarkup]:
+async def _render_book_done(ctx: ViewContext, arg: str) -> ScreenView:
     try:
         booking_id = int(arg)
     except (TypeError, ValueError):
@@ -354,66 +592,148 @@ async def _render_book_done(ctx: ViewContext, arg: str) -> tuple[str, InlineKeyb
     if booking is None:
         return await _render_menu(ctx, "")
 
+    club = ctx.cfg.club
     body = texts.render(
         texts.SCREEN_BOOK_DONE_BODY,
-        ctx.cfg.club,
+        club,
         booking_id=booking.id,
         tariff=escape_html(booking.tariff),
         time_slot=escape_html(booking.time_slot),
         client_name=escape_html(booking.client_name),
-        payment_note=texts.SCREEN_DONE_PAID_CHECK
-        if booking.receipt_file_id
-        else texts.SCREEN_DONE_PAID_SPOT,
+        payment_note=(
+            texts.SCREEN_DONE_PAID_CHECK if booking.receipt_file_id else texts.SCREEN_DONE_PAID_SPOT
+        ),
     )
-    return (
-        _compose(Screen.BOOK_DONE, ctx.cfg.club, body),
-        footer_rows([("📋 Мои брони", nav(Screen.BOOKINGS))]),
+    return ScreenView(
+        card=render_ticket_card(club, booking),
+        caption=_compose(Screen.BOOK_DONE, club, body),
+        reply_markup=footer_rows([("📋 Мои брони", nav(Screen.BOOKINGS))]),
     )
 
 
-async def _render_privacy(ctx: ViewContext, _arg: str) -> tuple[str, InlineKeyboardMarkup]:
-    from bot.keyboards.inline import CB_CONSENT_REVOKE
+# --------------------------------------------------------------------------- #
+# 152-ФЗ: согласие, политика ПДн и отзыв согласия
+# --------------------------------------------------------------------------- #
+async def _render_consent(ctx: ViewContext, _arg: str) -> ScreenView:
+    club = ctx.cfg.club
+    card = render_info_card(
+        club,
+        cache_tag="consent_152fz",
+        badge="152-ФЗ · ЗАЩИТА ДАННЫХ",
+        title="Добро пожаловать в ADMIRAL",
+        subtitle="Подтвердите согласие на обработку данных для бронирования мест",
+        highlights=[
+            ("Только для брони", "Имя, выбранный зал, время сессии и чек оплаты."),
+            ("Хранение в РФ", "База клуба без рекламных рассылок и передачи третьим лицам."),
+            ("Отзыв в 1 клик", "Раздел /privacy отключает обработку в любой момент."),
+            ("Оператор", f"{club.name}, г. {club.city} · {club.admin_phone}"),
+        ],
+        accent=COL_GREEN,
+    )
+    body = texts.render(texts.SCREEN_CONSENT_CARD_BODY, club)
+    return ScreenView(
+        card=card,
+        caption=_compose(Screen.CONSENT, club, body),
+        reply_markup=consent_keyboard(),
+    )
 
-    return (
-        _compose(Screen.PRIVACY, ctx.cfg.club, texts.render(texts.PRIVACY_TEXT, ctx.cfg.club)),
-        footer_rows([("🚫 Отозвать согласие", CB_CONSENT_REVOKE)]),
+
+async def _render_privacy(ctx: ViewContext, _arg: str) -> ScreenView:
+    club = ctx.cfg.club
+    card = render_info_card(
+        club,
+        cache_tag="privacy_152fz",
+        badge="152-ФЗ · ПЕРСОНАЛЬНЫЕ ДАННЫЕ",
+        title="Обработка персональных данных",
+        subtitle=f"Оператор: {club.name}, г. {club.city}, {club.address}",
+        highlights=[
+            ("Что хранится", "Telegram ID, имя, параметры брони и фото чека оплаты."),
+            ("Безопасность", "Сервер в РФ, доступ есть только у администраторов смены."),
+            ("Отзыв согласия", "Кнопка ниже мгновенно останавливает работу бота."),
+            ("Удаление записи", f"По обращению к {club.admin_phone} в течение 10 раб. дней."),
+        ],
+        accent=COL_CYAN,
+    )
+    body = texts.render(texts.SCREEN_PRIVACY_CARD_BODY, club)
+    return ScreenView(
+        card=card,
+        caption=_compose(Screen.PRIVACY, club, body),
+        reply_markup=footer_rows([("🚫 Отозвать согласие", CB_CONSENT_REVOKE, "danger")]),
+    )
+
+
+async def _render_privacy_confirm(ctx: ViewContext, _arg: str) -> ScreenView:
+    club = ctx.cfg.club
+    card = render_info_card(
+        club,
+        cache_tag="privacy_confirm",
+        badge="ПОДТВЕРЖДЕНИЕ · 152-ФЗ",
+        title="Отозвать согласие на ПДн?",
+        subtitle="После отзыва меню, прайс и бронирование в боте будут заблокированы",
+        highlights=[
+            ("Что произойдёт", "Обработка ваших данных прекратится сразу (ч. 2 ст. 9 152-ФЗ)."),
+            ("Как вернуть доступ", "В любой момент кнопкой «Я согласен» или командой /start."),
+        ],
+        accent=COL_RED,
+    )
+    return ScreenView(
+        card=card,
+        caption=_compose(Screen.PRIVACY_CONFIRM, club, texts.CONSENT_REVOKE_CONFIRM),
+        reply_markup=revoke_confirm_keyboard(),
+    )
+
+
+async def _render_consent_revoked(ctx: ViewContext, arg: str) -> ScreenView:
+    club = ctx.cfg.club
+    revoked_at = arg or now_full_text(ctx.cfg.timezone)
+    card = render_info_card(
+        club,
+        cache_tag="consent_revoked",
+        badge="БОТ ОСТАНОВЛЕН · 152-ФЗ",
+        title="Согласие отозвано",
+        subtitle="Доступ к меню и бронированию закрыт до повторного согласия",
+        highlights=[
+            ("Статус", f"Согласие отозвано ({revoked_at}). Заявки не принимаются."),
+            ("Полное удаление", f"Напишите администратору: {club.admin_phone} ({club.admin_name})."),
+        ],
+        accent=COL_RED,
+    )
+    body = texts.render(texts.CONSENT_REVOKED, club, revoked_at=escape_html(revoked_at))
+    return ScreenView(
+        card=card,
+        caption=_compose(Screen.CONSENT_REVOKED, club, body),
+        reply_markup=consent_keyboard(),
     )
 
 
 # --------------------------------------------------------------------------- #
 # Админ-панель
 # --------------------------------------------------------------------------- #
-async def _render_admin(ctx: ViewContext, _arg: str) -> tuple[str, InlineKeyboardMarkup]:
+async def _render_admin(ctx: ViewContext, _arg: str) -> ScreenView:
+    club = ctx.cfg.club
     stats = await ctx.db.get_stats()
-    summary = pre(
-        table(
-            ("ПОКАЗАТЕЛЬ", "ЗНАЧ"),
-            [
-                ("Заявок всего", stats.total),
-                ("Ожидают", stats.pending),
-                ("Одобрено", stats.approved),
-                ("Отклонено", stats.rejected),
-                ("Клиентов", stats.users),
-                ("Администраторов", f"{stats.admins_active}/{stats.admins}"),
-            ],
-        )
+    now_str = now_text(ctx.cfg.timezone)
+    body = texts.render(
+        texts.SCREEN_ADMIN_BODY,
+        club,
+        now=now_str,
+        **stats.as_dict(),
     )
-    body = "\n".join(
-        [
-            summary,
-            "",
-            texts.render(texts.SCREEN_ADMIN_BODY, ctx.cfg.club, now=now_text(ctx.cfg.timezone)),
-        ]
-    )
-    rows: list[list[Button]] = [
-        [("📋 Активные брони", nav(Screen.ADMIN_PENDING, 0))],
+    pending_label = f"📋 Активные брони ({stats.pending})" if stats.pending else "📋 Активные брони"
+    rows: list[Sequence[ButtonSpec]] = [
+        [(pending_label, nav(Screen.ADMIN_PENDING, 0), "primary" if stats.pending else "")],
         [("👥 Администраторы", nav(Screen.ADMIN_ADMINS))],
-        [(BTN_REFRESH, nav(Screen.ADMIN)), (BTN_BACK, nav(SCREEN_BACK))],
+        [(BTN_REFRESH, nav(Screen.ADMIN)), (BTN_BACK, nav(SCREEN_BACK)), (BTN_HOME, nav(Screen.MENU))],
     ]
-    return _compose(Screen.ADMIN, ctx.cfg.club, body), keyboard(*rows)
+    return ScreenView(
+        card=render_admin_dashboard_card(club, stats, now_str),
+        caption=_compose(Screen.ADMIN, club, body),
+        reply_markup=keyboard(*rows),
+    )
 
 
-async def _render_admin_pending(ctx: ViewContext, arg: str) -> tuple[str, InlineKeyboardMarkup]:
+async def _render_admin_pending(ctx: ViewContext, arg: str) -> ScreenView:
+    club = ctx.cfg.club
     try:
         page = max(0, int(arg))
     except (TypeError, ValueError):
@@ -447,10 +767,10 @@ async def _render_admin_pending(ctx: ViewContext, arg: str) -> tuple[str, Inline
             for booking, user in entries
         )
 
-    rows: list[list[Button]] = [
+    rows: list[Sequence[ButtonSpec]] = [
         [
-            (f"✅ №{booking.id}", admin_approve_callback(booking.id)),
-            (f"❌ №{booking.id}", admin_reject_callback(booking.id)),
+            (f"✅ №{booking.id}", admin_approve_callback(booking.id), "success"),
+            (f"❌ №{booking.id}", admin_reject_callback(booking.id), "danger"),
         ]
         for booking, _user in entries
     ]
@@ -463,19 +783,31 @@ async def _render_admin_pending(ctx: ViewContext, arg: str) -> tuple[str, Inline
             ]
         )
     rows.append([(BTN_REFRESH, nav(Screen.ADMIN_PENDING, page))])
-    rows.append([(BTN_BACK, nav(SCREEN_BACK)), ("🏠 В меню", nav(Screen.MENU))])
+    rows.append([(BTN_BACK, nav(SCREEN_BACK)), (BTN_HOME, nav(Screen.MENU))])
     extra = f"стр. {page + 1}/{pages}" if pages > 1 else ""
-    return _compose(Screen.ADMIN_PENDING, ctx.cfg.club, body, extra=extra), keyboard(*rows)
+    return ScreenView(
+        card=render_admin_pending_card(
+            club,
+            entries,
+            total_pending=total,
+            page=page,
+            pages=pages,
+            tz=ctx.cfg.timezone,
+        ),
+        caption=_compose(Screen.ADMIN_PENDING, club, body, extra=extra),
+        reply_markup=keyboard(*rows),
+    )
 
 
-async def _render_admin_admins(ctx: ViewContext, _arg: str) -> tuple[str, InlineKeyboardMarkup]:
+async def _render_admin_admins(ctx: ViewContext, _arg: str) -> ScreenView:
+    club = ctx.cfg.club
     admins = await ctx.db.list_admins()
     viewer_is_owner = await _is_owner(ctx)
     total, active = await ctx.db.count_admins()
 
     blocks = [
         texts.render(
-            texts.SCREEN_ADMIN_ADMINS_BODY, ctx.cfg.club, admins_total=total, admins_active=active
+            texts.SCREEN_ADMIN_ADMINS_BODY, club, admins_total=total, admins_active=active
         )
     ]
     if not admins:
@@ -485,20 +817,24 @@ async def _render_admin_admins(ctx: ViewContext, _arg: str) -> tuple[str, Inline
         role = viewer.role_title if viewer is not None else AdminRole.title(AdminRole.OPERATOR)
         blocks.append(texts.ADMIN_MANAGE_FORBIDDEN.format(role=role))
 
-    rows: list[list[Button]] = []
+    rows: list[Sequence[ButtonSpec]] = []
     for admin in admins:
         label = await _admin_short_label(ctx, admin.user_id)
         mark = "👑" if admin.is_owner else "👤"
         state = "🟢" if admin.is_active else "🔴"
         rows.append([(f"{state} {mark} {label}", nav(Screen.ADMIN_ADMIN, admin.user_id))])
     if viewer_is_owner:
-        rows.append([("➕ Добавить", CB_ADMIN_ADD)])
+        rows.append([("➕ Добавить", CB_ADMIN_ADD, "primary")])
     rows.append([(BTN_REFRESH, nav(Screen.ADMIN_ADMINS))])
-    rows.append([(BTN_BACK, nav(SCREEN_BACK)), ("🏠 В меню", nav(Screen.MENU))])
-    return _compose(Screen.ADMIN_ADMINS, ctx.cfg.club, "\n\n".join(blocks)), keyboard(*rows)
+    rows.append([(BTN_BACK, nav(SCREEN_BACK)), (BTN_HOME, nav(Screen.MENU))])
+    return ScreenView(
+        card=render_admin_team_card(club, admins),
+        caption=_compose(Screen.ADMIN_ADMINS, club, "\n\n".join(blocks)),
+        reply_markup=keyboard(*rows),
+    )
 
 
-async def _render_admin_card(ctx: ViewContext, arg: str) -> tuple[str, InlineKeyboardMarkup]:
+async def _render_admin_card(ctx: ViewContext, arg: str) -> ScreenView:
     try:
         target_id = int(arg)
     except (TypeError, ValueError):
@@ -508,10 +844,12 @@ async def _render_admin_card(ctx: ViewContext, arg: str) -> tuple[str, InlineKey
     if admin is None:
         return await _render_admin_admins(ctx, "")
 
+    club = ctx.cfg.club
+    all_admins = await ctx.db.list_admins()
     is_env_owner = admin.user_id == ctx.cfg.admin_id
     body = texts.render(
         texts.SCREEN_ADMIN_ADMIN_BODY,
-        ctx.cfg.club,
+        club,
         link=await _admin_label(ctx, admin.user_id),
         user_id=admin.user_id,
         role=admin.role_title,
@@ -522,49 +860,52 @@ async def _render_admin_card(ctx: ViewContext, arg: str) -> tuple[str, InlineKey
     if is_env_owner:
         body += f"\n\n{texts.ADMINS_OWNER_ENV_NOTE.strip()}"
 
-    rows: list[list[Button]] = []
+    rows: list[Sequence[ButtonSpec]] = []
     if await _is_owner(ctx) and not is_env_owner:
         rows.append(
             [
                 (
                     "⛔️ Отключить" if admin.is_active else "✅ Включить",
                     admin_toggle_callback(admin.user_id),
+                    "danger" if admin.is_active else "success",
                 )
             ]
         )
-        role_row: list[Button] = []
+        role_row: list[ButtonSpec] = []
         if admin.role != AdminRole.OWNER:
             role_row.append(("👑 Сделать владельцем", admin_promote_callback(admin.user_id)))
         if admin.role != AdminRole.OPERATOR:
             role_row.append(("👤 Сделать оператором", admin_demote_callback(admin.user_id)))
         if role_row:
             rows.append(role_row)
-        rows.append([("🗑 Удалить", admin_delete_callback(admin.user_id))])
+        rows.append([("🗑 Удалить", admin_delete_callback(admin.user_id), "danger")])
 
     rows.append([(BTN_REFRESH, nav(Screen.ADMIN_ADMIN, admin.user_id))])
-    rows.append([("◀ К списку", nav(Screen.ADMIN_ADMINS)), ("🏠 В меню", nav(Screen.MENU))])
-    return _compose(Screen.ADMIN_ADMIN, ctx.cfg.club, body), keyboard(*rows)
+    rows.append([("◀ К списку", nav(Screen.ADMIN_ADMINS)), (BTN_HOME, nav(Screen.MENU))])
+    return ScreenView(
+        card=render_admin_team_card(club, all_admins, selected=admin),
+        caption=_compose(Screen.ADMIN_ADMIN, club, body),
+        reply_markup=keyboard(*rows),
+    )
 
 
-async def _render_admin_add(ctx: ViewContext, _arg: str) -> tuple[str, InlineKeyboardMarkup]:
-    from bot.keyboards.inline import CB_ADMIN_ADD_CANCEL
-
-    body = texts.render(texts.ADMIN_ADD_PROMPT, ctx.cfg.club)
-    return (
-        _compose(Screen.ADMIN_ADD, ctx.cfg.club, body),
-        keyboard([(BTN_CANCEL, CB_ADMIN_ADD_CANCEL)]),
+async def _render_admin_add(ctx: ViewContext, _arg: str) -> ScreenView:
+    club = ctx.cfg.club
+    all_admins = await ctx.db.list_admins()
+    body = texts.render(texts.ADMIN_ADD_PROMPT, club)
+    return ScreenView(
+        card=render_admin_team_card(club, all_admins, adding=True),
+        caption=_compose(Screen.ADMIN_ADD, club, body),
+        reply_markup=keyboard([(BTN_CANCEL, CB_ADMIN_ADD_CANCEL, "danger")]),
     )
 
 
 def _amount_text(tariff_title: str, time_slot: str, today: Any) -> str:
-    """Сумма заявки для списка администратора: «650 ₽» или «по прайсу»."""
     amount = texts.amount_for_booking(tariff_title, time_slot, today)
     return f"{amount} ₽" if amount is not None else "по прайсу"
 
 
-# --- подписи администраторов ------------------------------------------------ #
 async def _admin_label(ctx: ViewContext, user_id: int) -> str:
-    """Как показать администратора: «@nickname» или «Имя (ID: …)»."""
     stored = await ctx.db.get_user(user_id)
     if stored is not None:
         return stored.link
@@ -572,7 +913,6 @@ async def _admin_label(ctx: ViewContext, user_id: int) -> str:
 
 
 async def _admin_short_label(ctx: ViewContext, user_id: int) -> str:
-    """Короткая подпись для кнопки: «@nickname» или «id123»."""
     stored = await ctx.db.get_user(user_id)
     if stored is not None:
         return stored.mention
@@ -580,10 +920,9 @@ async def _admin_short_label(ctx: ViewContext, user_id: int) -> str:
 
 
 async def _label_from_telegram(ctx: ViewContext, user_id: int, *, short: bool) -> str:
-    """Подпись из профиля Telegram (администратор мог ни разу не писать боту)."""
     try:
         chat = await ctx.bot.get_chat(user_id)
-    except Exception:  # noqa: BLE001 — профиль недоступен, показываем ID
+    except Exception:  # noqa: BLE001
         logger.debug("Не удалось получить профиль администратора %s", user_id)
         return f"id{user_id}" if short else f"пользователь (ID: <code>{user_id}</code>)"
     username = getattr(chat, "username", None)
@@ -600,7 +939,7 @@ async def _label_from_telegram(ctx: ViewContext, user_id: int, *, short: bool) -
 # --------------------------------------------------------------------------- #
 # Диспетчер экранов
 # --------------------------------------------------------------------------- #
-Renderer = Callable[[ViewContext, str], Awaitable[tuple[str, InlineKeyboardMarkup]]]
+Renderer = Callable[[ViewContext, str], Awaitable[ScreenView]]
 
 _RENDERERS: dict[str, Renderer] = {
     Screen.MENU: _render_menu,
@@ -617,7 +956,10 @@ _RENDERERS: dict[str, Renderer] = {
     Screen.BOOK_PAY: _render_book_pay,
     Screen.BOOK_RECEIPT: _render_book_receipt,
     Screen.BOOK_DONE: _render_book_done,
+    Screen.CONSENT: _render_consent,
     Screen.PRIVACY: _render_privacy,
+    Screen.PRIVACY_CONFIRM: _render_privacy_confirm,
+    Screen.CONSENT_REVOKED: _render_consent_revoked,
     Screen.ADMIN: _render_admin,
     Screen.ADMIN_PENDING: _render_admin_pending,
     Screen.ADMIN_ADMINS: _render_admin_admins,
@@ -626,8 +968,8 @@ _RENDERERS: dict[str, Renderer] = {
 }
 
 
-async def render_screen(ctx: ViewContext, screen: str, arg: str = "") -> tuple[str, InlineKeyboardMarkup]:
-    """Собрать экран: ``(текст, клавиатура)``. Неизвестный экран — меню."""
+async def render_screen(ctx: ViewContext, screen: str, arg: str = "") -> ScreenView:
+    """Собрать графический экран :class:`ScreenView`. Неизвестный экран — меню."""
     renderer = _RENDERERS.get(screen)
     if renderer is None:
         logger.debug("Неизвестный экран %r — показываю меню", screen)
@@ -636,8 +978,10 @@ async def render_screen(ctx: ViewContext, screen: str, arg: str = "") -> tuple[s
 
 
 __all__ = [
+    "CAPTION_LIMIT",
     "MESSAGE_LIMIT",
     "Renderer",
+    "ScreenView",
     "ViewContext",
     "render_screen",
 ]

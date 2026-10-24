@@ -47,7 +47,6 @@ from bot.keyboards.inline import (
     CB_TIME_PREFIX,
     PAY_WAY_CHECK,
     PAY_WAY_SPOT,
-    consent_keyboard,
     parse_payment_way,
     parse_tariff_key,
     parse_time_key,
@@ -246,25 +245,14 @@ async def cmd_start(
 
     if not user.consent_given:
         _consent_gate.forget(sender.id)
-        if old_message_id is not None:
-            from bot.utils.telegram import safe_delete_message
-
-            await safe_delete_message(message.bot, sender.id, int(old_message_id))
-        await state.update_data(**{DATA_SCREEN_MESSAGE: None, DATA_SCREEN_STACK: []})
-        await message.answer(
-            texts.render(texts.CONSENT_TEXT, cfg.club),
-            reply_markup=consent_keyboard(),
-        )
+        navigator = _navigate(message, db=db, cfg=cfg, state=state, admins=admins)
+        await navigator.restart(Screen.CONSENT, old_message_id=old_message_id)
         logger.info("Пользователь %s: запрошено согласие на обработку ПДн", sender.id)
         return
 
     _consent_gate.mark_consented(sender.id)
     navigator = _navigate(message, db=db, cfg=cfg, state=state, admins=admins)
     await navigator.restart(Screen.MENU, old_message_id=old_message_id)
-
-    greeting = await _admin_greeting(db, cfg, admins, sender.id)
-    if greeting:
-        await navigator.notify(greeting)
     logger.info("Пользователь %s открыл главное меню", sender.id)
 
 
@@ -310,7 +298,7 @@ async def cb_consent_give(
     cfg: AppConfig,
     admins: AdminRegistry | None = None,
 ) -> None:
-    """Кнопка «✅ Я согласен»: фиксируем согласие и открываем меню."""
+    """Кнопка «✅ Я согласен»: фиксируем согласие и открываем главное меню."""
     sender = callback.from_user
     if sender is None:
         await callback.answer()
@@ -322,29 +310,55 @@ async def cb_consent_give(
     _consent_gate.mark_consented(sender.id)
 
     navigator = _navigate(callback, db=db, cfg=cfg, state=state, admins=admins)
-    accepted = texts.CONSENT_ACCEPTED.format(consent_time=now_full_text(cfg.timezone))
-    await navigator.show(Screen.MENU, push=False, note=accepted)
-    await navigator.answer("Согласие зафиксировано ✅")
-
-    greeting = await _admin_greeting(db, cfg, admins, sender.id)
-    if greeting:
-        await navigator.notify(greeting)
+    await navigator.show(Screen.MENU, push=False)
+    await navigator.answer(f"Согласие зафиксировано ✅ ({now_full_text(cfg.timezone)})")
     logger.info("Пользователь %s дал согласие на обработку ПДн", sender.id)
 
 
 @router.callback_query(F.data == CB_CONSENT_REVOKE)
-async def cb_consent_revoke(callback: CallbackQuery) -> None:
-    """Кнопка «🚫 Отозвать согласие»: просим подтвердить серьёзное действие."""
-    from bot.keyboards.inline import revoke_confirm_keyboard
-    from bot.utils.telegram import edit_or_send
+async def cb_consent_revoke(
+    callback: CallbackQuery,
+    state: FSMContext | None = None,
+    db: Database | None = None,
+    cfg: AppConfig | None = None,
+    admins: AdminRegistry | None = None,
+) -> None:
+    """Кнопка «🚫 Отозвать согласие»: карточка подтверждения в том же сообщении."""
+    if state is not None and db is not None and cfg is not None:
+        navigator = _navigate(callback, db=db, cfg=cfg, state=state, admins=admins)
+        await navigator.show(Screen.PRIVACY_CONFIRM, push=False)
+        await navigator.answer()
+        return
 
-    await edit_or_send(
+    from bot.config import ClubInfo
+    from bot.keyboards.inline import revoke_confirm_keyboard
+    from bot.ui.cards import COL_RED, render_info_card
+    from bot.utils.telegram import edit_or_send, safe_edit_message_media
+
+    card = render_info_card(
+        ClubInfo(),
+        cache_tag="privacy_confirm",
+        badge="ПОДТВЕРЖДЕНИЕ · 152-ФЗ",
+        title="Отозвать согласие на ПДн?",
+        subtitle="После отзыва меню и бронирование будут заблокированы",
+        highlights=[("152-ФЗ", "Обработка данных прекратится сразу после подтверждения.")],
+        accent=COL_RED,
+    )
+    if not await safe_edit_message_media(
         callback.bot,
         callback.message.chat.id,
         callback.message.message_id,
+        card,
         texts.CONSENT_REVOKE_CONFIRM,
         revoke_confirm_keyboard(),
-    )
+    ):
+        await edit_or_send(
+            callback.bot,
+            callback.message.chat.id,
+            callback.message.message_id,
+            texts.CONSENT_REVOKE_CONFIRM,
+            revoke_confirm_keyboard(),
+        )
     await callback.answer()
 
 
@@ -368,30 +382,24 @@ async def cb_consent_revoke_yes(
     state: FSMContext,
     db: Database,
     cfg: AppConfig,
+    admins: AdminRegistry | None = None,
 ) -> None:
     """Отзыв согласия: обработка ПДн прекращается, бот перестаёт работать."""
-    from bot.utils.telegram import edit_or_send
-
     sender = callback.from_user
     if sender is None:
         await callback.answer()
         return
 
+    mid = callback.message.message_id if callback.message is not None else None
     await state.clear()
+    if mid is not None:
+        await state.update_data(**{DATA_SCREEN_MESSAGE: mid})
+
     await db.set_consent(sender.id, granted=False)
     _consent_gate.forget(sender.id)
 
-    await edit_or_send(
-        callback.bot,
-        callback.message.chat.id,
-        callback.message.message_id,
-        texts.render(
-            texts.CONSENT_REVOKED,
-            cfg.club,
-            revoked_at=now_full_text(cfg.timezone),
-        ),
-        consent_keyboard(),
-    )
+    navigator = _navigate(callback, db=db, cfg=cfg, state=state, admins=admins)
+    await navigator.show(Screen.CONSENT_REVOKED, now_full_text(cfg.timezone), push=False)
     await callback.answer("Согласие отозвано", show_alert=True)
     logger.info("Пользователь %s отозвал согласие на обработку ПДн", sender.id)
 
