@@ -1,31 +1,33 @@
-"""Экраны интерфейса: один экран — одно сообщение, которое бот перезаписывает.
+"""Экраны графического интерфейса: идентификаторы, кнопки и подписи.
 
-Интерфейс бота собран как меню игрового клуба, а не как переписка:
+Интерфейс бота построен на графических фото-карточках клуба ADMIRAL:
 
-* у пользователя всегда **ровно один** актуальный экран — бот не пишет новое
-  сообщение, а редактирует текущее (``editMessageText``);
-* вся навигация — inline-кнопки под этим же сообщением, reply-клавиатуры нет;
-* у каждого экрана есть «◀ Назад» и «🏠 В меню», а переходы запоминаются в
-  стеке, поэтому «Назад» возвращает туда, откуда пользователь пришёл;
-* шапка каждого экрана — моноширинная рамка (HUD) с названием клуба, как на
-  табло в компьютерном клубе.
-
-Здесь лежат только «чистые» вещи: идентификаторы экранов, ``callback_data``,
-рисование рамок и сборка клавиатур. За содержимое экранов (тексты, запросы к
-базе) отвечает :mod:`bot.ui.render`, а за переходы — :mod:`bot.ui.navigator`.
+* у пользователя всегда **ровно один** актуальный экран в чате — бот отправляет
+  фото-карточку один раз (``sendPhoto``) и при всех переходах обновляет её на
+  месте (``editMessageMedia``);
+* никаких блоков ``<pre>`` с плашкой «копировать» и псевдографики из дефисов —
+  вся визуальная подача (тарифная сетка, шаги брони, билет, дашборд админа)
+  отрисована на HD-карточках (:mod:`bot.ui.cards`), а подпись использует чистую
+  HTML-вёрстку Telegram (``<blockquote>``, ``<b>``, ``<code>``);
+* ключевые кнопки выделены нативными цветами Bot API (``primary``, ``success``,
+  ``danger``), а реквизиты и телефон снабжены кнопками копирования в один тап
+  (:class:`aiogram.types.CopyTextButton`).
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Final
+from typing import Final, TypeAlias
 
 from aiogram.filters.callback_data import CallbackData
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot import texts
 from bot.db.models import BookingStatus
 from bot.utils.formatting import escape_html
+
+_SUPPORTS_STYLE: Final[bool] = "style" in InlineKeyboardButton.model_fields
+_SUPPORTS_COPY: Final[bool] = "copy_text" in InlineKeyboardButton.model_fields
 
 
 # --------------------------------------------------------------------------- #
@@ -38,7 +40,7 @@ class Screen:
     MENU: Final[str] = "menu"
     #: Залы и цены.
     PRICES: Final[str] = "prices"
-    #: Правила клуба.
+    #: Правила клуба (в ``arg`` — вкладка: ``main`` / ``pay`` / ``club``).
     RULES: Final[str] = "rules"
     #: Список вопросов FAQ.
     FAQ: Final[str] = "faq"
@@ -77,16 +79,22 @@ class Screen:
 
     #: Персональные данные (152-ФЗ) и отзыв согласия.
     PRIVACY: Final[str] = "privacy"
+    #: Подтверждение отзыва согласия.
+    PRIVACY_CONFIRM: Final[str] = "privacy_confirm"
+    #: Стартовый запрос согласия (152-ФЗ) до допуска к меню.
+    CONSENT: Final[str] = "consent"
+    #: Экран после отзыва согласия (бот остановлен до нового согласия).
+    CONSENT_REVOKED: Final[str] = "consent_revoked"
 
 
-#: Заголовки экранов — подставляются в шапку HUD.
+#: Заголовки экранов — аккуратная верхняя строка подписи под карточкой.
 SCREEN_TITLES: Final[dict[str, str]] = {
     Screen.MENU: "ГЛАВНОЕ МЕНЮ",
     Screen.PRICES: "ЗАЛЫ И ЦЕНЫ",
     Screen.RULES: "ПРАВИЛА КЛУБА",
     Screen.FAQ: "ЧАСТЫЕ ВОПРОСЫ",
     Screen.FAQ_ITEM: "ЧАСТЫЕ ВОПРОСЫ",
-    Screen.CONTACTS: "КОНТАКТЫ",
+    Screen.CONTACTS: "КОНТАКТЫ И ОПЛАТА",
     Screen.BOOKINGS: "МОИ БРОНИ",
     Screen.BOOK_TARIFF: "БРОНЬ · ШАГ 1/4 · ЗАЛ",
     Screen.BOOK_TIME: "БРОНЬ · ШАГ 2/4 · ВРЕМЯ",
@@ -98,9 +106,38 @@ SCREEN_TITLES: Final[dict[str, str]] = {
     Screen.ADMIN: "АДМИН-ПАНЕЛЬ",
     Screen.ADMIN_PENDING: "АКТИВНЫЕ БРОНИ",
     Screen.ADMIN_ADMINS: "АДМИНИСТРАТОРЫ",
-    Screen.ADMIN_ADMIN: "АДМИНИСТРАТОР",
+    Screen.ADMIN_ADMIN: "КАРТОЧКА АДМИНИСТРАТОРА",
     Screen.ADMIN_ADD: "НОВЫЙ АДМИНИСТРАТОР",
-    Screen.PRIVACY: "ПЕРСОНАЛЬНЫЕ ДАННЫЕ",
+    Screen.PRIVACY: "ПЕРСОНАЛЬНЫЕ ДАННЫЕ (152-ФЗ)",
+    Screen.PRIVACY_CONFIRM: "ОТЗЫВ СОГЛАСИЯ (152-ФЗ)",
+    Screen.CONSENT: "СОГЛАСИЕ НА ОБРАБОТКУ ДАННЫХ (152-ФЗ)",
+    Screen.CONSENT_REVOKED: "ДОСТУП ПРИОСТАНОВЛЕН (152-ФЗ)",
+}
+
+SCREEN_ICONS: Final[dict[str, str]] = {
+    Screen.MENU: "⚡️",
+    Screen.PRICES: "🖥",
+    Screen.RULES: "📜",
+    Screen.FAQ: "❓",
+    Screen.FAQ_ITEM: "💬",
+    Screen.CONTACTS: "📞",
+    Screen.BOOKINGS: "📋",
+    Screen.BOOK_TARIFF: "🎮",
+    Screen.BOOK_TIME: "🕒",
+    Screen.BOOK_TIME_TEXT: "✏️",
+    Screen.BOOK_NAME: "👤",
+    Screen.BOOK_PAY: "💳",
+    Screen.BOOK_RECEIPT: "📸",
+    Screen.BOOK_DONE: "✅",
+    Screen.ADMIN: "🛠",
+    Screen.ADMIN_PENDING: "📋",
+    Screen.ADMIN_ADMINS: "👥",
+    Screen.ADMIN_ADMIN: "🧑‍💼",
+    Screen.ADMIN_ADD: "➕",
+    Screen.PRIVACY: "🛡",
+    Screen.PRIVACY_CONFIRM: "🚫",
+    Screen.CONSENT: "🛡",
+    Screen.CONSENT_REVOKED: "🚫",
 }
 
 #: Экраны-шаги бронирования: на них «Назад» ведёт на предыдущий шаг.
@@ -129,16 +166,11 @@ def nav(screen: str, arg: str | int = "") -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Оформление: моноширинная шапка, таблицы, подписи кнопок
+# Подписи кнопок и текстовые элементы (без <pre> в рабочих экранах)
 # --------------------------------------------------------------------------- #
-#: Ширина рамки HUD в символах (считая внутренние отступы).
 HUD_WIDTH: Final[int] = 28
 
-#: Рамка «табло клуба»: ┌────┐ / │ ▚▚ ADMIRAL ▚▚ │ / └────┘
-HUD_BORDER_TOP: Final[str] = "┌" + "─" * HUD_WIDTH + "┐"
-HUD_BORDER_BOTTOM: Final[str] = "└" + "─" * HUD_WIDTH + "┘"
-
-#: Подписи служебных кнопок (одинаковые на всех экранах).
+BTN_BOOK_HERO: Final[str] = "🎮 Забронировать место"
 BTN_BACK: Final[str] = "◀ Назад"
 BTN_HOME: Final[str] = "🏠 В меню"
 BTN_REFRESH: Final[str] = "🔄 Обновить"
@@ -146,48 +178,30 @@ BTN_STEP_BACK: Final[str] = "‹ Шаг назад"
 BTN_CANCEL: Final[str] = "✕ Отменить"
 
 
-def _hud_row(text: str) -> str:
-    """Строка рамки с текстом по центру."""
-    pad = HUD_WIDTH - len(text)
-    if pad <= 0:
-        return f"│{text[:HUD_WIDTH]}│"
-    left = pad // 2
-    return f"│{' ' * left}{text}{' ' * (pad - left)}│"
-
-
-def hud(title: str, subtitle: str = "") -> str:
-    """Моноширинная шапка экрана — «табло» над содержимым.
-
-    Пример::
-
-        ┌────────────────────────────┐
-        │       ▚▚ ADMIRAL ▚▚        │
-        │    ЧИТА · КРУГЛОСУТОЧНО    │
-        └────────────────────────────┘
-    """
-    rows = [_hud_row(title)]
-    if subtitle:
-        rows.append(_hud_row(subtitle))
-    body = "\n".join([HUD_BORDER_TOP, *rows, HUD_BORDER_BOTTOM])
-    return f"<pre>{escape_html(body)}</pre>"
-
-
-def pre(body: str) -> str:
-    """Моноширинный блок (таблица, сводка) с экранированием HTML."""
-    return f"<pre>{escape_html(body)}</pre>"
-
-
-def section(screen: str, extra: str = "") -> str:
-    """Заголовок раздела: «▸ ЗАЛЫ И ЦЕНЫ · стр. 1/2»."""
+def section(screen: str, club_name: str = "", extra: str = "") -> str:
+    """Чистая строка заголовка раздела без блоков кода ``<pre>``."""
+    icon = SCREEN_ICONS.get(screen, "⚡️")
     title = SCREEN_TITLES.get(screen, "")
-    line = f"▸ <b>{escape_html(title)}</b>"
+    prefix = f"<b>{escape_html(club_name)}</b> · " if club_name else ""
+    line = f"{icon} {prefix}<b>{escape_html(title)}</b>"
     if extra:
-        line += f" <i>{escape_html(extra)}</i>"
+        line += f"  <i>({escape_html(extra)})</i>"
     return line
 
 
+def hud(title: str, subtitle: str = "") -> str:
+    """Компактная плашка заголовка (сохранена для совместимости без ``<pre>``)."""
+    sub = f" · {escape_html(subtitle)}" if subtitle else ""
+    return f"<b>{escape_html(title)}</b>{sub}"
+
+
+def pre(body: str) -> str:
+    """Цитатный блок вместо ``<pre>`` (без серой шапки «копировать»)."""
+    return f"<blockquote>{escape_html(body)}</blockquote>"
+
+
 def table(header: Sequence[str], rows: Sequence[Sequence[object]]) -> str:
-    """Моноширинная таблица: столбцы выравниваются по самой длинной ячейке."""
+    """Текстовая таблица с выравниванием столбцов."""
     cells = [[str(cell) for cell in row] for row in rows]
     head = [str(cell) for cell in header]
     widths = [
@@ -198,7 +212,6 @@ def table(header: Sequence[str], rows: Sequence[Sequence[object]]) -> str:
     ]
 
     def line(parts: Sequence[str]) -> str:
-        # Первый столбец (название) — по левому краю, числа — по правому.
         cells_out = [parts[0].ljust(widths[0])]
         cells_out += [part.rjust(widths[i]) for i, part in enumerate(parts) if i]
         return "  ".join(cells_out).rstrip()
@@ -207,43 +220,77 @@ def table(header: Sequence[str], rows: Sequence[Sequence[object]]) -> str:
 
 
 def status_tag(status: str) -> str:
-    """Статус заявки в квадратных скобках: «[ ⏳ ОЖИДАЕТ ]»."""
+    """Статус заявки: «⏳ Ожидает подтверждения» / «✅ Одобрена» / «❌ Отклонена»."""
     known = {
-        BookingStatus.PENDING: "[ ⏳ ОЖИДАЕТ ]",
-        BookingStatus.APPROVED: "[ ✅ ОДОБРЕНО ]",
-        BookingStatus.REJECTED: "[ ❌ ОТКЛОНЕНО ]",
+        BookingStatus.PENDING: "⏳ <b>Ожидает</b>",
+        BookingStatus.APPROVED: "✅ <b>Одобрена</b>",
+        BookingStatus.REJECTED: "❌ <b>Отклонена</b>",
     }
-    return known.get(status, f"[ • {status.upper()} ]")
+    return known.get(status, f"• {escape_html(status)}")
 
 
 # --------------------------------------------------------------------------- #
-# Клавиатуры
+# Конструкторы кнопок и клавиатур
 # --------------------------------------------------------------------------- #
-def keyboard(*rows: Sequence[tuple[str, str]]) -> InlineKeyboardMarkup:
-    """Собрать inline-клавиатуру из строк кнопок ``(текст, callback_data)``."""
+ButtonSpec: TypeAlias = (
+    InlineKeyboardButton
+    | tuple[str, str]
+    | tuple[str, str, str]
+)
+
+
+def btn(
+    text: str,
+    callback_data: str | None = None,
+    *,
+    style: str | None = None,
+    copy_value: str | None = None,
+    url: str | None = None,
+) -> InlineKeyboardButton:
+    """Собрать inline-кнопку с поддержкой цвета Bot API и ``CopyTextButton``."""
+    kwargs: dict[str, object] = {"text": text}
+    if style and _SUPPORTS_STYLE:
+        kwargs["style"] = style
+    if copy_value is not None and _SUPPORTS_COPY:
+        kwargs["copy_text"] = CopyTextButton(text=copy_value)
+    elif url is not None:
+        kwargs["url"] = url
+    else:
+        kwargs["callback_data"] = callback_data or nav(Screen.MENU)
+    return InlineKeyboardButton(**kwargs)  # type: ignore[arg-type]
+
+
+def _coerce_button(spec: ButtonSpec) -> InlineKeyboardButton:
+    if isinstance(spec, InlineKeyboardButton):
+        return spec
+    if len(spec) == 3:
+        text, data, style = spec
+        return btn(text, data, style=style)
+    text, data = spec
+    return btn(text, data)
+
+
+def keyboard(*rows: Sequence[ButtonSpec]) -> InlineKeyboardMarkup:
+    """Собрать inline-клавиатуру из строк кнопок."""
     return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=text, callback_data=data) for text, data in row]
-            for row in rows
-        ]
+        inline_keyboard=[[_coerce_button(item) for item in row] for row in rows if row]
     )
 
 
-#: Служебный экран «вернуться назад» — навигатор обрабатывает его сам,
-#: снимая предыдущий экран со стека переходов.
+#: Служебный экран «вернуться назад» — навигатор снимает экран со стека.
 SCREEN_BACK: Final[str] = "back"
 
 
-def back_row(*, home: bool = True) -> list[tuple[str, str]]:
+def back_row(*, home: bool = True) -> list[ButtonSpec]:
     """Служебная строка навигации: «◀ Назад» (+ «🏠 В меню»)."""
-    row: list[tuple[str, str]] = [(BTN_BACK, nav(SCREEN_BACK))]
+    row: list[ButtonSpec] = [(BTN_BACK, nav(SCREEN_BACK))]
     if home:
         row.append((BTN_HOME, nav(Screen.MENU)))
     return row
 
 
 def footer_rows(
-    *rows: Sequence[tuple[str, str]],
+    *rows: Sequence[ButtonSpec],
     home: bool = True,
 ) -> InlineKeyboardMarkup:
     """Клавиатура с содержимым и служебной строкой «Назад / В меню» внизу."""
@@ -251,26 +298,46 @@ def footer_rows(
 
 
 def menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
-    """Главное меню клуба. Кнопка админ-панели видна только администраторам.
+    """Главное меню клуба.
 
-    Проверка прав выполняется на месте — Telegram не показывает кнопку тем,
-    у кого нет доступа, потому что мы её просто не присылаем.
+    * Первая строка — широкая акцентная кнопка «🎮 Забронировать место» (``primary``).
+    * Ниже — симметричная сетка разделов 2×3.
+    * Кнопка «🛠 Админ-панель» добавляется только активным администраторам.
     """
-    rows: list[Sequence[tuple[str, str]]] = [
-        [
-            ("🖥 Залы и цены", nav(Screen.PRICES)),
-            ("🎮 Забронировать", nav(Screen.BOOK_TARIFF)),
-        ],
-        [("📋 Мои брони", nav(Screen.BOOKINGS)), ("❓ FAQ", nav(Screen.FAQ))],
-        [("📜 Правила", nav(Screen.RULES)), ("📞 Контакты", nav(Screen.CONTACTS))],
+    rows: list[Sequence[ButtonSpec]] = [
+        [(BTN_BOOK_HERO, nav(Screen.BOOK_TARIFF), "primary")],
+        [("🖥 Залы и цены", nav(Screen.PRICES)), ("📋 Мои брони", nav(Screen.BOOKINGS))],
+        [("❓ FAQ", nav(Screen.FAQ)), ("📜 Правила", nav(Screen.RULES))],
+        [("📞 Контакты", nav(Screen.CONTACTS)), ("🛡 152-ФЗ", nav(Screen.PRIVACY))],
     ]
     if is_admin:
         rows.append([("🛠 Админ-панель", nav(Screen.ADMIN))])
     return keyboard(*rows)
 
 
+def rules_tabs_keyboard(active_tab: str) -> InlineKeyboardMarkup:
+    """Вкладки раздела «Правила клуба» + переход к бронированию."""
+    tabs = [
+        ("📌 Основное", texts.RULES_TAB_MAIN),
+        ("💳 Оплата", texts.RULES_TAB_PAY),
+        ("🎮 В клубе", texts.RULES_TAB_CLUB),
+    ]
+    tab_row: list[ButtonSpec] = [
+        (
+            f"• {label}" if key == active_tab else label,
+            nav(Screen.RULES, key),
+            "primary" if key == active_tab else "",
+        )
+        for label, key in tabs
+    ]
+    return footer_rows(
+        tab_row,
+        [(BTN_BOOK_HERO, nav(Screen.BOOK_TARIFF), "primary")],
+    )
+
+
 def faq_list_keyboard() -> InlineKeyboardMarkup:
-    """Список вопросов: по кнопке на вопрос, ответ открывается в этом же сообщении."""
+    """Список вопросов: по кнопке на вопрос, ответ открывается в том же сообщении."""
     return footer_rows(
         *[
             ((f"{item.emoji} {item.question}", nav(Screen.FAQ_ITEM, item.key)),)
@@ -281,22 +348,26 @@ def faq_list_keyboard() -> InlineKeyboardMarkup:
 
 def faq_answer_keyboard() -> InlineKeyboardMarkup:
     """Экран ответа: возврат к списку вопросов и в меню."""
-    return keyboard([("◀ К вопросам", nav(Screen.FAQ))], back_row())
+    return keyboard([("◀ К списку вопросов", nav(Screen.FAQ))], back_row())
 
 
 __all__ = [
     "BOOKING_SCREENS",
     "BTN_BACK",
+    "BTN_BOOK_HERO",
     "BTN_CANCEL",
     "BTN_HOME",
     "BTN_REFRESH",
     "BTN_STEP_BACK",
+    "ButtonSpec",
     "HUD_WIDTH",
     "SCREEN_BACK",
+    "SCREEN_ICONS",
     "SCREEN_TITLES",
     "Screen",
     "ScreenCB",
     "back_row",
+    "btn",
     "faq_answer_keyboard",
     "faq_list_keyboard",
     "footer_rows",
@@ -305,6 +376,7 @@ __all__ = [
     "menu_keyboard",
     "nav",
     "pre",
+    "rules_tabs_keyboard",
     "section",
     "status_tag",
     "table",

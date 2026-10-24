@@ -98,8 +98,26 @@ class ConsentMiddleware(BaseMiddleware):
 
         if isinstance(event, Message):
             first_word = (event.text or "").strip().split(maxsplit=1)[0] if event.text else ""
-            if first_word in ALLOWED_COMMANDS_BEFORE_CONSENT:
+            cmd = first_word.split("@", 1)[0]
+            if cmd in ALLOWED_COMMANDS_BEFORE_CONSENT:
                 return await handler(event, data)
+
+            state = data.get("state")
+            cfg = data.get("cfg")
+            if state is not None and cfg is not None:
+                from bot.ui.navigator import Navigator
+                from bot.ui.screens import Screen
+
+                navigator = Navigator.from_message(
+                    event,
+                    db=db,
+                    cfg=cfg,
+                    state=state,
+                    admins=data.get("admins"),
+                )
+                await navigator.show(Screen.CONSENT, push=False, note=texts.CONSENT_REQUIRED)
+                return None
+
             await event.answer(texts.CONSENT_REQUIRED, reply_markup=consent_keyboard())
             return None
 

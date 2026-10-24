@@ -11,8 +11,8 @@
 сообщения. Всё это меняется через `.env` без правки кода
 (см. [«Данные клуба»](#данные-клуба-цены-адрес-администратор)).
 
-**Стек:** Python 3.10+, [aiogram 3.x](https://docs.aiogram.dev/) (Router, F, FSMContext, StatesGroup),
-SQLite через [aiosqlite](https://aiosqlite.readthedocs.io/), [python-dotenv](https://saurabh-kumar.com/python-dotenv/).
+**Стек:** Python 3.10+, [aiogram 3.x](https://docs.aiogram.dev/) (Router, F, FSMContext, StatesGroup, `InputMediaPhoto`, `CopyTextButton`, `style`),
+[Pillow](https://python-pillow.org/) (генерация HD-карточек 1280×720), SQLite через [aiosqlite](https://aiosqlite.readthedocs.io/), [python-dotenv](https://saurabh-kumar.com/python-dotenv/).
 
 ---
 
@@ -36,16 +36,24 @@ SQLite через [aiosqlite](https://aiosqlite.readthedocs.io/), [python-dotenv
 
 ## Что умеет бот
 
-**Интерфейс — один экран, а не простыня сообщений:**
+**Графический интерфейс — один фото-экран с динамическими HD-карточками:**
 
-- 🖥 У пользователя всегда **одно рабочее сообщение-экран** с моноширинной
-  HUD-шапкой клуба (`┌── ▚▚ ADMIRAL ▚▚ ──┐`), которое перерисовывается на месте
-  (`editMessageText`), не засоряя чат.
-- ◀ Стек навигации: на каждом экране есть «◀ Назад» (возвращает именно туда,
-  откуда пришли) и «🏠 В меню», в мастере бронирования — «‹ Шаг назад» и
-  «✕ Отменить». Reply-клавиатуры нет — вся работа под сообщением.
-- 🛠 Кнопка **«🛠 Админ-панель»** прямо в главном меню — но только у тех, у кого
-  есть права администратора; обычный гость её не видит.
+- 🖼 У пользователя всегда **одно рабочее фото-сообщение** с фирменной карточкой
+  клуба **1280×720** (киберспортивный dark-neon / frosted-glass стиль, кириллические
+  шрифты Unbounded + Manrope + JetBrains Mono). При переходах меняются **и баннер
+  раздела, и HTML-подпись, и кнопки** в том же сообщении через `editMessageMedia`,
+  без спама и без code-блоков `<pre>`.
+- ⚡️ **Мгновенный отклик за счёт кэша `file_id`**: сгенерированные карточки
+  кэшируются в памяти и по серверному `file_id` Telegram — повторные переходы не
+  загружают изображения заново.
+- 🎨 **Современные элементы Bot API**: цветные акценты кнопок (`primary` / `success` /
+  `danger`) и копирование реквизитов Сбербанка и телефона клуба в один тап
+  (`CopyTextButton`).
+- ◀ Стек навигации: на каждом экране есть «◀ Назад» и «🏠 В меню», в «Правилах» —
+  переключаемые вкладки, в мастере бронирования — визуальный индикатор шагов `1–4`,
+  «‹ Шаг назад» и «✕ Отменить».
+- 🛠 Кнопка **«🛠 Админ-панель»** прямо в главном меню — только у активных
+  администраторов (и без лишних служебных сообщений под меню).
 
 **Клиенту:**
 
@@ -539,10 +547,14 @@ Admiral-club/
 │   │   ├── database.py        # Database: запросы, лок, WAL, мягкая миграция столбцов
 │   │   ├── models.py          # User, Booking, BookingStatus, BookingStats, Admin, AdminRole
 │   │   └── cli.py             # python -m bot.db.cli — создание базы
+│   ├── assets/
+│   │   ├── backgrounds/       # фоновые иллюстрации залов клуба (1280×720 JPEG)
+│   │   └── fonts/             # кириллические шрифты Unbounded, Manrope, JetBrains Mono (OFL)
 │   ├── ui/
-│   │   ├── screens.py         # HUD-рамки, моноширинные таблицы, клавиатуры, ScreenCB
-│   │   ├── render.py          # отрисовка всех экранов: текст + inline-кнопки
-│   │   └── navigator.py       # Navigator: editMessageText одного экрана и стек «Назад»
+│   │   ├── cards.py           # генератор HD-карточек (Pillow 1280×720) + кэш file_id
+│   │   ├── screens.py         # идентификаторы экранов, вкладки, цветные кнопки, CopyTextButton
+│   │   ├── render.py          # сборка ScreenView (карточка + HTML-подпись ≤1024 + клавиатура)
+│   │   └── navigator.py       # Navigator: editMessageMedia одного фото-экрана и стек «Назад»
 │   ├── keyboards/
 │   │   ├── reply.py           # запасные подписи старых кнопок (совместимость)
 │   │   └── inline.py          # inline-клавиатуры + формат и парсеры callback_data
@@ -558,10 +570,10 @@ Admiral-club/
 │   │   ├── client.py          # навигация nav:*, мастер брони, 152-ФЗ и отзыв согласия
 │   │   └── admin.py           # решения по заявкам и управление администраторами
 │   └── utils/
-│       ├── formatting.py      # escape_html, даты, склонения, ссылка на пользователя
-│       └── telegram.py        # безопасные edit/delete/send_screen (не роняют бота)
+│       ├── formatting.py      # escape_html, truncate_html, даты, склонения, ссылки
+│       └── telegram.py        # send_photo_screen, safe_edit_message_media и защита от ошибок API
 └── tests/
-    └── smoke_test.py          # 574 проверки без интернета: БД, HUD-экраны, весь сценарий
+    └── smoke_test.py          # 613 проверок без интернета: БД, карточки 1280×720, весь сценарий
 ```
 
 Разделение логики: `handlers/client.py` — клиент, `handlers/admin.py` —

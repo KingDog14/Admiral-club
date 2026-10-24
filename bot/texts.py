@@ -614,21 +614,11 @@ MENU_HINT: str = (
 
 HELP_TEXT: str = (
     "ℹ️ <b>Как пользоваться ботом</b>\n"
-    "\n"
-    "Бот работает в одном сообщении-экране: нажимайте кнопки под ним — разделы "
-    "открываются здесь же, без простыни сообщений. «◀ Назад» возвращает на "
-    "предыдущий экран, «🏠 В меню» — домой.\n"
-    "\n"
-    "• «🖥 Залы и цены» — Standart, VIP, S VIP, Double: 1/3/5 ч, утро, день, ночь.\n"
-    "• «🎮 Забронировать» — 4 шага: зал → время → имя → способ оплаты.\n"
-    "• «📋 Мои брони» — статусы ваших заявок.\n"
-    "• «❓ FAQ» — вопросы по одному, ответ открывается по нажатию.\n"
-    "• «📜 Правила», «📞 Контакты» — условия клуба, телефон и реквизиты.\n"
-    "\n"
-    "💵 Предоплата — только ночь в ПТ–ВС. В остальные дни платите на месте.\n"
-    "📞 Клуб: {admin_phone} ({admin_name}).\n"
-    "\n"
-    "Команды: /start — экран с нуля, /cancel — отмена брони, /privacy — 152-ФЗ."
+    "• <b>🎮 Забронировать место</b> — 4 шага: зал → время → имя → оплата.\n"
+    "• <b>🖥 Залы и цены</b> — Standart, VIP, S VIP, Double.\n"
+    "• <b>📋 Мои брони</b> · <b>❓ FAQ</b> · <b>📜 Правила</b> · <b>📞 Контакты</b>.\n"
+    "• Команды: /start — обновить экран, /cancel — отмена брони, /privacy — 152-ФЗ.\n"
+    "📞 Клуб: {admin_phone} ({admin_name})."
 )
 
 _PRICE_LIST_BODY: str = (
@@ -1291,128 +1281,176 @@ DECISION_WORD_APPROVED: str = "подтвердил"
 DECISION_WORD_REJECTED: str = "отклонил"
 
 # ---------------------------------------------------------------------------
-# Экраны интерфейса (HUD): содержимое под моноширинной шапкой
+# Экраны графического интерфейса (подписи под фото-карточками <= 1024 симв.)
 # ---------------------------------------------------------------------------
-# Заголовок экрана рисует bot/ui/screens.py (рамка + «▸ РАЗДЕЛ»), здесь только
-# тело экрана. Плейсхолдеры клуба ({club_*}, {admin_*}, {payment_*}) подставляет
-# render(), остальные — bot/ui/render.py.
 
 SCREEN_MENU_BODY: str = (
-    "Клуб <b>{club_place}</b>\n"
-    "📍 {club_address}\n"
-    "🕒 Работаем {club_hours}\n"
-    "\n"
-    "Выберите раздел — он откроется здесь же, в этом сообщении."
+    "<blockquote>📍 <b>{club_city}</b>, {club_address}\n"
+    "🕒 {club_hours}  ·  🎮 FACEIT во всех залах\n"
+    "📞 <a href=\"tel:{admin_phone_raw}\">{admin_phone}</a> ({admin_name})</blockquote>\n"
+    "💵 Будни и день — оплата на месте · ПТ–ВС ночь — по предоплате."
 )
 
 SCREEN_PRICES_BODY: str = (
-    "Цены в рублях. Пакеты: 🌅 утро {morning_slot}, ☀️ день {day_slot}, "
-    "🌙 ночь {night_slot}."
+    "Полная сетка цен — на карточке выше.\n"
+    "<blockquote>🌅 Утро <b>{morning_slot}</b>  ·  ☀️ День <b>{day_slot}</b>  ·  🌙 Ночь <b>{night_slot}</b>\n"
+    "⏱ Почасовая игра: <b>1 / 3 / 5 часов</b> в любое время вне пакетов</blockquote>"
 )
 
 SCREEN_PRICES_NOTE: str = (
-    "🌙 Ночь ПТ–ВС: {night_weekend}\n"
-    "💳 Предоплата — только ночь в ПТ–ВС: <b>{payment_system} {payment_card}</b> "
-    "({payment_holder})\n"
-    "🎮 FACEIT работает."
+    "🌙 <b>Ночь в ПТ–ВС:</b> {night_weekend} (полная предоплата).\n"
+    "💳 Единый номер: <b>{payment_system}</b> <code>{payment_card}</code> ({payment_holder})\n"
+    "🎮 <b>FACEIT</b> работает на всех ПК."
+)
+
+#: Разделы правил клуба для вкладок (каждая вкладка укладывается в лимит 1024).
+RULES_TAB_MAIN: str = "main"
+RULES_TAB_PAY: str = "pay"
+RULES_TAB_CLUB: str = "club"
+
+SCREEN_RULES_MAIN: str = (
+    "<blockquote>📍 {club_address} · {club_hours}\n"
+    "🔞 Ночной пакет ({night_slot}) до 18 лет — только с согласия родителей (нужен документ)</blockquote>\n"
+    "• Бронь действует после подтверждения администратором (обычно 1–2 минуты).\n"
+    "• При опоздании более чем на <b>15 минут</b> место может быть передано другому гостю.\n"
+    "• Отмена с возвратом — не позднее чем за <b>1 час</b> до начала сессии.\n"
+    "• Снять человека с брони можно на входе — вернём оплату за него."
+)
+
+SCREEN_RULES_PAY: str = (
+    "<blockquote>💳 Единый номер клуба: <b>{payment_system}</b> <code>{payment_card}</code> ({payment_holder})\n"
+    "Других номеров у клуба нет.</blockquote>\n"
+    "• Предоплата — <b>только на ночные пакеты в выходные (ПТ–ВС)</b> (100% стоимости).\n"
+    "• В будни и на утренних/дневных пакетах можно оплатить <b>на месте</b>.\n"
+    "• ⚠️ <b>Осторожно, мошенники!</b> Мы обсуждаем предоплату <b>только в общей группе</b> "
+    "и не пишем первыми в личку. Сомневаетесь — звоните: {admin_phone}."
+)
+
+SCREEN_RULES_CLUB: str = (
+    "<blockquote>🎮 Бережное отношение к технике и комфорт гостей в зале</blockquote>\n"
+    "• Запрещены алкоголь, курение, вейпы, электронные сигареты, брань и агрессия.\n"
+    "• Нельзя менять системные настройки ПК, ставить стороннее ПО и подключать свои устройства без разрешения админа.\n"
+    "• После игры обязательно выходите из личных аккаунтов Steam / FACEIT.\n"
+    "• Порча периферии, мониторов и кресел компенсируется по стоимости ремонта.\n"
+    "• Спорные вопросы: {admin_phone} ({admin_name})."
+)
+
+SCREEN_CONTACTS_CARD_BODY: str = (
+    "<blockquote>📱 <b><a href=\"tel:{admin_phone_raw}\">{admin_phone}</a></b> — {admin_name}\n"
+    "📍 г. {club_city}, {club_address}\n"
+    "🕒 Режим работы: <b>{club_hours}</b></blockquote>\n"
+    "💳 <b>Реквизиты (ночь в ПТ–ВС):</b> {payment_system} <code>{payment_card}</code> ({payment_holder})\n"
+    "⚠️ Мы не пишем первыми в личные сообщения про оплату — только общая группа."
 )
 
 SCREEN_BOOKINGS_EMPTY: str = (
-    "Заявок пока нет.\n\n«🎮 Забронировать» — 4 шага, около минуты."
+    "У вас пока нет оформленных заявок.\n"
+    "Нажмите <b>«🎮 Забронировать»</b> — выбор зала и времени займёт меньше минуты."
 )
 
 SCREEN_BOOKINGS_ITEM: str = (
-    "<b>№{number}</b> · {tariff} · {time_slot}\n🕒 {created} — {status}"
+    "<b>№{number}</b> · <b>{tariff}</b> · {time_slot}\n"
+    "   🕒 {created} — {status}"
 )
 
 SCREEN_BOOK_TARIFF_BODY: str = (
-    "Выберите зал. Цена указана за час:\n\n{tariffs_overview}"
+    "Выберите игровой зал:\n\n"
+    "<blockquote>{tariffs_overview}</blockquote>"
 )
 
 SCREEN_BOOK_TIME_BODY: str = (
-    "Зал: <b>{tariff}</b>\n"
-    "🕒 Сейчас в клубе {now_time}, {now_date}\n"
-    "\n"
-    "Когда вас ждать? Пакеты оплачиваются целиком, "
-    "«⚡️ Сейчас» — почасовая игра."
+    "<blockquote>🖥 Зал: <b>{tariff}</b>\n"
+    "🕒 Сейчас в клубе: <b>{now_time}</b> ({now_date})</blockquote>\n"
+    "Выберите пакет или почасовую игру кнопкой ниже."
 )
 
 SCREEN_BOOK_TIME_TEXT_BODY: str = (
-    "Зал: <b>{tariff}</b>\n"
-    "\n"
-    "Напишите время текстом: «сегодня в 18:30 на 3 часа» "
-    "или «завтра с 15:00 до 20:00».\n"
-    "\n"
-    "⏰ До 60 символов."
+    "<blockquote>🖥 Зал: <b>{tariff}</b></blockquote>\n"
+    "Напишите желаемое время одним сообщением в чат:\n"
+    "<i>например, «сегодня в 18:30 на 3 часа» или «завтра с 15:00 до 20:00»</i> (до 60 симв.)."
 )
 
 SCREEN_BOOK_NAME_BODY: str = (
-    "Зал: <b>{tariff}</b>\n"
-    "Время: <b>{time_slot}</b>\n"
-    "\n"
-    "Напишите имя — по нему администратор найдёт вас в клубе.\n"
-    "От 2 до 40 символов, только буквы."
+    "<blockquote>🖥 Зал: <b>{tariff}</b>\n"
+    "🕒 Время: <b>{time_slot}</b></blockquote>\n"
+    "Напишите в чат <b>ваше имя</b> (2–40 букв) — по нему администратор встретит вас на входе."
 )
 
 SCREEN_BOOK_PAY_BODY: str = (
-    "Зал: <b>{tariff}</b>\n"
-    "Время: <b>{time_slot}</b>\n"
-    "Имя: <b>{client_name}</b>\n"
-    "💰 К оплате: {amount}\n"
-    "\n"
+    "<blockquote>🖥 Зал: <b>{tariff}</b>\n"
+    "🕒 Время: <b>{time_slot}</b>\n"
+    "👤 Гость: <b>{client_name}</b>\n"
+    "💰 К оплате: {amount}</blockquote>\n"
     "{payment_rules}"
 )
 
 SCREEN_BOOK_RECEIPT_BODY: str = (
-    "Переведите {amount} на единый номер клуба:\n"
-    "<b>{payment_system} {payment_card}</b> ({payment_holder})\n"
-    "\n"
-    "Затем пришлите <b>ФОТО чека</b> — снимок экрана из банковского "
-    "приложения или фото квитанции."
+    "<blockquote>💳 <b>{payment_system}</b> <code>{payment_card}</code> ({payment_holder})\n"
+    "💰 Сумма: {amount}</blockquote>\n"
+    "Пришлите сюда <b>ФОТО чека</b> (скриншот перевода из банка как фото, не файлом)."
 )
 
 SCREEN_BOOK_DONE_BODY: str = (
-    "Заявка <b>№{booking_id}</b> ушла администраторам — обычно ответ "
-    "приходит за 1–2 минуты.\n"
-    "\n"
-    "Зал: <b>{tariff}</b>\n"
-    "Время: <b>{time_slot}</b>\n"
-    "Имя: <b>{client_name}</b>\n"
-    "Оплата: <b>{payment_note}</b>\n"
-    "\n"
-    "Ждите подтверждения сюда — отправлять заявку повторно не нужно."
+    "<blockquote>🧾 Заявка <b>№{booking_id}</b>\n"
+    "🖥 Зал: <b>{tariff}</b>  ·  🕒 <b>{time_slot}</b>\n"
+    "👤 Гость: <b>{client_name}</b>\n"
+    "💳 Оплата: <b>{payment_note}</b></blockquote>\n"
+    "⏳ Администратор ответит за <b>1–2 минуты</b> — уведомление придёт в этот чат."
 )
 
 #: Способ оплаты на экране «Заявка отправлена» (для клиента, не для админа).
 SCREEN_DONE_PAID_CHECK: str = "чек отправлен на проверку"
 SCREEN_DONE_PAID_SPOT: str = "на месте, при входе в клуб"
 
+SCREEN_CONSENT_CARD_BODY: str = (
+    "Официальный бот клуба <b>{club_place}</b> ({club_address}).\n\n"
+    "<blockquote><b>Согласие на обработку ПДн (ч. 1 ст. 9 ФЗ № 152-ФЗ)</b>\n"
+    "• <b>Данные:</b> Telegram ID, username, имя профиля и брони, зал, время, способ оплаты, фото чека.\n"
+    "• <b>Цель обработки:</b> бронирование мест, проверка оплаты и связь по заявке.\n"
+    "• <b>Хранение:</b> БД клуба на сервере в РФ без передачи третьим лицам.</blockquote>\n"
+    "Отозвать согласие можно в любой момент в разделе <b>/privacy</b> (кнопка «🚫 Отозвать согласие»). "
+    "Связь с клубом: {admin_phone} ({admin_name})."
+)
+
+SCREEN_PRIVACY_CARD_BODY: str = (
+    "<blockquote><b>Оператор:</b> {club_name}, г. {club_city}, {club_address}\n"
+    "<b>Основание:</b> ФЗ № 152-ФЗ «О персональных данных» (ст. 9, 14, 21)</blockquote>\n"
+    "• <b>Храним:</b> Telegram ID, username, имя, параметры брони и фото чека "
+    "(сервер в РФ, без рассылок и передачи третьим лицам).\n"
+    "• <b>Срок:</b> до отзыва согласия; чеки и заявки об оплате — до 5 лет.\n"
+    "• <b>Отзыв:</b> кнопка «🚫 Отозвать согласие» ниже сразу отключает бота.\n"
+    "• <b>Удаление данных:</b> обратитесь к {admin_name} ({admin_phone}) — удалим за 10 раб. дней."
+)
+
 SCREEN_ADMIN_BODY: str = (
-    "Сводка клуба на <b>{now}</b>. Кнопка «🔄 Обновить» — чтобы освежить цифры."
+    "<blockquote>📊 <b>Заявок всего:</b> {total}  ·  ⏳ <b>Ожидают:</b> {pending}\n"
+    "✅ <b>Одобрено:</b> {approved}  ·  ❌ <b>Отклонено:</b> {rejected}\n"
+    "👥 <b>Клиентов:</b> {users}  ·  🧑‍💼 <b>Администраторов:</b> {admins_active}/{admins}</blockquote>\n"
+    "🕒 Срез на <b>{now}</b>. Новые брони приходят всем активным админам смены."
 )
 
 SCREEN_ADMIN_PENDING_ITEM: str = (
-    "<b>№{booking_id}</b> · {tariff} · {time_slot}\n"
-    "👤 {client_name} · {client_link}\n"
-    "🕒 {created} · 💰 {amount}"
+    "<b>№{booking_id}</b> · <b>{tariff}</b> · {time_slot}\n"
+    "   👤 {client_name} ({client_link}) · 🕒 {created} · 💰 {amount}"
 )
 
-SCREEN_ADMIN_PENDING_EMPTY: str = "Все заявки разобраны — новых нет."
+SCREEN_ADMIN_PENDING_EMPTY: str = (
+    "✅ <b>Очередь чиста</b> — неразобранных заявок сейчас нет."
+)
 
 SCREEN_ADMIN_ADMINS_BODY: str = (
-    "Записей: {admins_total}, активных: {admins_active}.\n"
-    "Нажмите на администратора, чтобы открыть карточку."
+    "<blockquote>Записей: {admins_total}, активных: {admins_active}</blockquote>\n"
+    "Выберите сотрудника ниже, чтобы управлять ролью и доступом."
 )
 
 SCREEN_ADMIN_ADMIN_BODY: str = (
-    "{link}\n"
-    "🆔 <code>{user_id}</code>\n"
-    "🎖 Роль: {role}\n"
-    "📶 Статус: {state}\n"
-    "🕒 Добавлен: {added_at} · {added_by}"
+    "<blockquote>👤 {link}\n"
+    "🆔 ID: <code>{user_id}</code>\n"
+    "🎖 Роль: <b>{role}</b>  ·  📶 {state}\n"
+    "🕒 Добавлен: {added_at} ({added_by})</blockquote>"
 )
 
-SCREEN_PRIVACY_BODY: str = PRIVACY_TEXT
+SCREEN_PRIVACY_BODY: str = SCREEN_PRIVACY_CARD_BODY
 
 
 def tariff_titles() -> Iterable[str]:
@@ -1512,6 +1550,9 @@ __all__ = [
     "RECEIPT_NOT_PHOTO",
     "RECEIPT_RECEIVED",
     "RECEIPT_WAITING",
+    "RULES_TAB_CLUB",
+    "RULES_TAB_MAIN",
+    "RULES_TAB_PAY",
     "SCREEN_ADMIN_ADMINS_BODY",
     "SCREEN_ADMIN_ADMIN_BODY",
     "SCREEN_ADMIN_BODY",
@@ -1526,12 +1567,18 @@ __all__ = [
     "SCREEN_BOOK_TARIFF_BODY",
     "SCREEN_BOOK_TIME_BODY",
     "SCREEN_BOOK_TIME_TEXT_BODY",
+    "SCREEN_CONSENT_CARD_BODY",
+    "SCREEN_CONTACTS_CARD_BODY",
     "SCREEN_DONE_PAID_CHECK",
     "SCREEN_DONE_PAID_SPOT",
     "SCREEN_MENU_BODY",
     "SCREEN_PRICES_BODY",
     "SCREEN_PRICES_NOTE",
     "SCREEN_PRIVACY_BODY",
+    "SCREEN_PRIVACY_CARD_BODY",
+    "SCREEN_RULES_CLUB",
+    "SCREEN_RULES_MAIN",
+    "SCREEN_RULES_PAY",
     "STATS_TEMPLATE",
     "STEP_HINT_NAME",
     "STEP_HINT_PAYMENT",
