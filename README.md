@@ -548,9 +548,9 @@ Admiral-club/
 │   │   ├── models.py          # User, Booking, BookingStatus, BookingStats, Admin, AdminRole
 │   │   └── cli.py             # python -m bot.db.cli — создание базы
 │   ├── assets/
-│   │   ├── logo.png           # фирменный неоновый логотип-трезубец ADMIRAL (прозрачный RGBA)
-│   │   ├── avatar.jpg         # готовый аватар бота 640×640 для @BotFather (/setuserpic)
-│   │   ├── backgrounds/       # фоновые сцены залов в гамме #C424FF → #2269FF (1280×720)
+│   │   ├── logo.png           # фирменный неоновый логотип ADMIRAL (прозрачный RGBA)
+│   │   ├── avatar.jpg         # точная копия логотипа 640×640 (в т.ч. для @BotFather)
+│   │   ├── backgrounds/       # абстрактные неоновые фоны #C424FF → #2269FF (1280×720, без фото залов)
 │   │   └── fonts/             # кириллические шрифты Unbounded, Manrope, JetBrains Mono (OFL)
 │   ├── ui/
 │   │   ├── cards.py           # генератор HD-карточек (Pillow 1280×720) + кэш file_id

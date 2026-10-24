@@ -467,6 +467,18 @@ def _load_admiral_logo(diameter: int, opacity: float = 1.0) -> Image.Image:
     return out.resize((diameter, diameter), Image.Resampling.LANCZOS)
 
 
+@lru_cache(maxsize=8)
+def _load_exact_avatar_rgb(diameter: int) -> Image.Image | None:
+    """Точная копия исходного логотипа клуба из ``bot/assets/avatar.jpg``."""
+    avatar_path = ASSETS_DIR / "avatar.jpg"
+    if not avatar_path.is_file():
+        return None
+    try:
+        return Image.open(avatar_path).convert("RGB").resize((diameter, diameter), Image.Resampling.LANCZOS)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _draw_admiral_emblem(
     canvas: Image.Image,
     cx: int,
@@ -476,11 +488,54 @@ def _draw_admiral_emblem(
     *,
     opacity: float = 1.0,
 ) -> None:
-    """Отрисовать фирменный логотип-трезубец ADMIRAL с центром в ``(cx, cy)``."""
+    """Скопировать фирменный логотип ADMIRAL с центром в ``(cx, cy)`` без квадратной рамки."""
+    import math
+
     _ = color
     diameter = max(16, int(size * 2))
+    x0 = cx - diameter // 2
+    y0 = cy - diameter // 2
+
+    src_rgb = _load_exact_avatar_rgb(diameter)
+    if opacity >= 0.95 and src_rgb is not None:
+        patch = canvas.crop((x0, y0, x0 + diameter, y0 + diameter)).convert("RGB")
+        spx = src_rgb.load()
+        ppx = patch.load()
+        mid = (diameter - 1) / 2.0
+        max_r = diameter / 2.0
+        for yy in range(diameter):
+            for xx in range(diameter):
+                dist = math.hypot(xx - mid, yy - mid) / max_r
+                if dist >= 0.995:
+                    continue
+                sr, sg, sb = spx[xx, yy]
+                br, bg_c, bb = ppx[xx, yy]
+                if dist <= 0.77:
+                    # Внутри неонового кольца сохраняем 1:1 пиксели исходной картинки
+                    ppx[xx, yy] = (sr, sg, sb)
+                else:
+                    # За пределами кольца мягко сводим оригинальное неоновое свечение в фон (Screen blend)
+                    t = max(0.0, min(1.0, (dist - 0.77) / (0.995 - 0.77)))
+                    fade = 0.5 * (1.0 + math.cos(math.pi * t))
+                    # Плавный переход подложки от чёрного ядра к фону в зоне 0.77..0.85
+                    if dist < 0.85:
+                        k = (dist - 0.77) / 0.08
+                        br = int(round(br * k))
+                        bg_c = int(round(bg_c * k))
+                        bb = int(round(bb * k))
+                    lr = int(round(sr * fade))
+                    lg = int(round(sg * fade))
+                    lb = int(round(sb * fade))
+                    ppx[xx, yy] = (
+                        255 - ((255 - br) * (255 - lr)) // 255,
+                        255 - ((255 - bg_c) * (255 - lg)) // 255,
+                        255 - ((255 - bb) * (255 - lb)) // 255,
+                    )
+        canvas.paste(patch, (x0, y0))
+        return
+
     emblem = _load_admiral_logo(diameter, round(opacity, 2))
-    canvas.paste(emblem, (cx - diameter // 2, cy - diameter // 2), emblem)
+    canvas.paste(emblem, (x0, y0), emblem)
 
 
 def _top_brand_bar(
