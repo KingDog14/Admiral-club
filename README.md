@@ -548,7 +548,9 @@ Admiral-club/
 │   │   ├── models.py          # User, Booking, BookingStatus, BookingStats, Admin, AdminRole
 │   │   └── cli.py             # python -m bot.db.cli — создание базы
 │   ├── assets/
-│   │   ├── backgrounds/       # фоновые иллюстрации залов клуба (1280×720 JPEG)
+│   │   ├── logo.png           # фирменный неоновый логотип-трезубец ADMIRAL (прозрачный RGBA)
+│   │   ├── avatar.jpg         # готовый аватар бота 640×640 для @BotFather (/setuserpic)
+│   │   ├── backgrounds/       # фоновые сцены залов в гамме #C424FF → #2269FF (1280×720)
 │   │   └── fonts/             # кириллические шрифты Unbounded, Manrope, JetBrains Mono (OFL)
 │   ├── ui/
 │   │   ├── cards.py           # генератор HD-карточек (Pillow 1280×720) + кэш file_id
@@ -573,7 +575,7 @@ Admiral-club/
 │       ├── formatting.py      # escape_html, truncate_html, даты, склонения, ссылки
 │       └── telegram.py        # send_photo_screen, safe_edit_message_media и защита от ошибок API
 └── tests/
-    └── smoke_test.py          # 613 проверок без интернета: БД, карточки 1280×720, весь сценарий
+    └── smoke_test.py          # 616 проверок без интернета: БД, карточки 1280×720, весь сценарий
 ```
 
 Разделение логики: `handlers/client.py` — клиент, `handlers/admin.py` —

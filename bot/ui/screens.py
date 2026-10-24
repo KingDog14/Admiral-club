@@ -115,7 +115,7 @@ SCREEN_TITLES: Final[dict[str, str]] = {
 }
 
 SCREEN_ICONS: Final[dict[str, str]] = {
-    Screen.MENU: "⚡️",
+    Screen.MENU: "🔱",
     Screen.PRICES: "🖥",
     Screen.RULES: "📜",
     Screen.FAQ: "❓",

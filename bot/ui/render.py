@@ -53,7 +53,6 @@ from bot.states import DATA_CLIENT_NAME, DATA_TARIFF_KEY, DATA_TIME_KEY, DATA_TI
 from bot.ui.cards import (
     COL_CYAN,
     COL_GOLD,
-    COL_GREEN,
     COL_RED,
     RenderedCard,
     clean_card_text,
@@ -628,7 +627,7 @@ async def _render_consent(ctx: ViewContext, _arg: str) -> ScreenView:
             ("Отзыв в 1 клик", "Раздел /privacy отключает обработку в любой момент."),
             ("Оператор", f"{club.name}, г. {club.city} · {club.admin_phone}"),
         ],
-        accent=COL_GREEN,
+        accent=COL_CYAN,
     )
     body = texts.render(texts.SCREEN_CONSENT_CARD_BODY, club)
     return ScreenView(
