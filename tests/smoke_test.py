@@ -3123,6 +3123,17 @@ async def test_graphical_cards(db: Database, cfg: AppConfig) -> None:
     ]
     check("На экране контактов есть кнопки копирования реквизитов и телефона", len(copy_btns) == 2)
 
+    # Проверка фирменного логотипа ADMIRAL и аватара для @BotFather
+    from bot.ui.cards import ASSETS_DIR, LOGO_PATH
+
+    check("Фирменный логотип bot/assets/logo.png существует", LOGO_PATH.is_file())
+    with Image.open(LOGO_PATH) as logo_img:
+        check(
+            "Логотип прозрачный по краям (RGBA без чёрной рамки)",
+            logo_img.mode == "RGBA" and logo_img.getpixel((0, 0))[3] == 0,
+        )
+    check("Аватар клуба bot/assets/avatar.jpg подготовлен для @BotFather", (ASSETS_DIR / "avatar.jpg").is_file())
+
     await state.storage.close()
 
 

@@ -45,26 +45,33 @@ CARD_H: int = 720
 ASSETS_DIR: Path = Path(__file__).resolve().parent.parent / "assets"
 FONTS_DIR: Path = ASSETS_DIR / "fonts"
 BG_DIR: Path = ASSETS_DIR / "backgrounds"
+LOGO_PATH: Path = ASSETS_DIR / "logo.png"
 
-# Основные цвета (RGBA)
-COL_WHITE = (248, 250, 252, 255)
-COL_TEXT = (226, 232, 240, 255)
-COL_MUTED = (148, 163, 184, 255)
-COL_DIM = (100, 116, 139, 255)
+# Фирменный неоновый градиент клуба ADMIRAL (по официальному логотипу):
+# пурпурно-фиолетовый (#C424FF) → индиго (#6C48FF) → электрический синий (#2269FF)
+BRAND_PURPLE = (196, 36, 255, 255)
+BRAND_INDIGO = (108, 72, 255, 255)
+BRAND_BLUE = (34, 105, 255, 255)
 
-COL_CYAN = (0, 229, 255, 255)
-COL_BLUE = (82, 150, 255, 255)
-COL_VIOLET = (185, 142, 255, 255)
-COL_GOLD = (255, 206, 52, 255)
-COL_GREEN = (0, 230, 118, 255)
-COL_RED = (255, 92, 92, 255)
-COL_AMBER = (255, 183, 20, 255)
+# Основные цвета интерфейса (RGBA)
+COL_WHITE = (248, 250, 255, 255)
+COL_TEXT = (226, 232, 248, 255)
+COL_MUTED = (154, 164, 194, 255)
+COL_DIM = (102, 112, 145, 255)
+
+COL_CYAN = (84, 162, 255, 255)  # электрический сапфирово-ледяной акцент
+COL_BLUE = (52, 126, 255, 255)  # глубокий королевский синий (#347EFF)
+COL_VIOLET = (196, 62, 255, 255)  # фирменный неоновый фиолетовый (#C43EFF)
+COL_GOLD = (232, 92, 255, 255)  # премиальный орхидейно-пурпурный неон (VIP / реквизиты)
+COL_GREEN = (36, 232, 152, 255)  # изумрудный неон (подтверждено / онлайн)
+COL_RED = (255, 78, 126, 255)  # неоновый малиново-алый (отклонено / антифрод)
+COL_AMBER = (250, 180, 56, 255)  # статус ожидания проверки
 
 TIER_COLORS: dict[str, tuple[int, int, int, int]] = {
-    "standart": COL_CYAN,
-    "vip": COL_BLUE,
-    "svip": COL_VIOLET,
-    "double": COL_GOLD,
+    "standart": (62, 146, 255, 255),
+    "vip": (126, 96, 255, 255),
+    "svip": (196, 56, 255, 255),
+    "double": (236, 84, 226, 255),
 }
 
 # Удаляем эмодзи и вариационные селекторы: .ttf-шрифты рисуют вместо них «□».
@@ -174,24 +181,19 @@ def _font(family: str, size: int, weight: int = 600) -> ImageFont.FreeTypeFont |
 
 
 def _procedural_bg(theme: str) -> Image.Image:
-    """Резервный кибер-фон, если файл изображения недоступен."""
-    base = Image.new("RGB", (CARD_W, CARD_H), (7, 11, 20))
+    """Резервный обсидианово-неоновый фон в фирменной гамме #C424FF → #2269FF."""
+    _ = theme
+    base = Image.new("RGB", (CARD_W, CARD_H), (4, 3, 12))
     draw = ImageDraw.Draw(base, "RGBA")
-    accent = {
-        "lounge": (0, 200, 255),
-        "vip": (140, 90, 255),
-        "pass": (0, 230, 160),
-        "admin": (255, 175, 30),
-    }.get(theme, (0, 200, 255))
     for step in range(0, CARD_W, 64):
-        draw.line([(step, 0), (step, CARD_H)], fill=(*accent, 16), width=1)
+        draw.line([(step, 0), (step, CARD_H)], fill=(126, 84, 255, 15), width=1)
     for step in range(0, CARD_H, 64):
-        draw.line([(0, step), (CARD_W, step)], fill=(*accent, 16), width=1)
+        draw.line([(0, step), (CARD_W, step)], fill=(64, 120, 255, 15), width=1)
     glow = Image.new("RGBA", (CARD_W, CARD_H), (0, 0, 0, 0))
     gdraw = ImageDraw.Draw(glow)
-    gdraw.ellipse((-180, -160, 620, 480), fill=(*accent, 75))
-    gdraw.ellipse((760, 280, 1440, 880), fill=(40, 110, 255, 65))
-    glow = glow.filter(ImageFilter.GaussianBlur(90))
+    gdraw.ellipse((-220, 180, 640, 920), fill=(196, 36, 255, 86))
+    gdraw.ellipse((660, -180, 1480, 560), fill=(34, 105, 255, 86))
+    glow = glow.filter(ImageFilter.GaussianBlur(95))
     return Image.alpha_composite(base.convert("RGBA"), glow).convert("RGB")
 
 
@@ -213,19 +215,19 @@ def _load_backdrop(theme: str) -> tuple[Image.Image, Image.Image]:
     else:
         fitted = _procedural_bg(theme)
 
-    darkened = ImageEnhance.Brightness(fitted).enhance(0.66)
-    saturated = ImageEnhance.Color(darkened).enhance(1.16)
+    darkened = ImageEnhance.Brightness(fitted).enhance(0.68)
+    saturated = ImageEnhance.Color(darkened).enhance(1.18)
 
     base_rgba = saturated.convert("RGBA")
-    vignette = Image.new("RGBA", (CARD_W, CARD_H), (5, 9, 18, 92))
-    ImageDraw.Draw(vignette).rectangle((70, 56, CARD_W - 70, CARD_H - 56), fill=(5, 9, 18, 38))
+    vignette = Image.new("RGBA", (CARD_W, CARD_H), (4, 3, 14, 96))
+    ImageDraw.Draw(vignette).rectangle((70, 56, CARD_W - 70, CARD_H - 56), fill=(4, 3, 14, 36))
     vignette = vignette.filter(ImageFilter.GaussianBlur(65))
     base_rgb = Image.alpha_composite(base_rgba, vignette).convert("RGB")
 
-    # Матовое стекло: глубокое размытие фона + обсидиановый оттенок.
-    glass_blur = fitted.filter(ImageFilter.GaussianBlur(22))
-    glass_blur = ImageEnhance.Brightness(glass_blur).enhance(0.36).convert("RGBA")
-    tint = Image.new("RGBA", (CARD_W, CARD_H), (7, 12, 24, 172))
+    # Матовое стекло: глубокое размытие фона + обсидианово-индиговый оттенок.
+    glass_blur = fitted.filter(ImageFilter.GaussianBlur(24))
+    glass_blur = ImageEnhance.Brightness(glass_blur).enhance(0.34).convert("RGBA")
+    tint = Image.new("RGBA", (CARD_W, CARD_H), (7, 5, 20, 182))
     glass_rgb = Image.alpha_composite(glass_blur, tint).convert("RGB")
     return base_rgb, glass_rgb
 
@@ -295,17 +297,54 @@ def _fit_display_font(
     return _font("display", min_size, weight)
 
 
+def _draw_gradient_bar(
+    canvas: Image.Image,
+    box: tuple[int, int, int, int],
+    *,
+    c_left: tuple[int, int, int, int] = BRAND_PURPLE,
+    c_right: tuple[int, int, int, int] = BRAND_BLUE,
+    radius: int = 2,
+) -> None:
+    """Нарисовать фирменную неоновую полосу-градиент #C424FF → #2269FF с мягким свечением."""
+    x0, y0, x1, y1 = box
+    w, h = x1 - x0, y1 - y0
+    if w <= 0 or h <= 0:
+        return
+
+    strip = Image.new("RGBA", (w, 1), (0, 0, 0, 0))
+    spx = strip.load()
+    denom = max(1, w - 1)
+    for ix in range(w):
+        t = ix / denom
+        r = int(round(c_left[0] + (c_right[0] - c_left[0]) * t))
+        g = int(round(c_left[1] + (c_right[1] - c_left[1]) * t))
+        b = int(round(c_left[2] + (c_right[2] - c_left[2]) * t))
+        spx[ix, 0] = (r, g, b, 255)
+    bar_img = strip.resize((w, h), Image.Resampling.BILINEAR)
+
+    mask = Image.new("L", (w, h), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, w - 1, h - 1), radius=radius, fill=255)
+
+    pad = 12
+    glow_layer = Image.new("RGBA", (w + pad * 2, h + pad * 2), (0, 0, 0, 0))
+    glow_layer.paste(bar_img, (pad, pad), mask)
+    glow_layer = glow_layer.filter(ImageFilter.GaussianBlur(5))
+    canvas.paste(glow_layer, (x0 - pad, y0 - pad), glow_layer)
+    canvas.paste(bar_img, (x0, y0), mask)
+
+
 def _glass_panel(
     canvas: Image.Image,
     glass_src: Image.Image,
     box: tuple[int, int, int, int],
     *,
     radius: int = 24,
-    border: tuple[int, int, int, int] = (255, 255, 255, 42),
+    border: tuple[int, int, int, int] = (148, 112, 255, 58),
     top_accent: tuple[int, int, int, int] | None = None,
+    gradient_bar: bool = False,
     fill_boost: tuple[int, int, int, int] | None = None,
 ) -> None:
-    """Нарисовать панель из матового стекла с размытием подложки и тонким кантом."""
+    """Нарисовать панель из матового стекла с размытием подложки и тонким неоновым кантом."""
     x0, y0, x1, y1 = box
     w, h = x1 - x0, y1 - y0
     if w <= 0 or h <= 0:
@@ -323,10 +362,15 @@ def _glass_panel(
     draw = ImageDraw.Draw(canvas, "RGBA")
     draw.rounded_rectangle(box, radius=radius, outline=border, width=2)
 
-    if top_accent is not None:
-        accent_w = min(w - radius * 2, max(64, int(w * 0.40)))
+    if gradient_bar:
+        accent_w = min(w - radius * 2, max(120, int(w * 0.54)))
         ax0 = x0 + radius
-        draw.rounded_rectangle((ax0, y0, ax0 + accent_w, y0 + 4), radius=2, fill=top_accent)
+        _draw_gradient_bar(canvas, (ax0, y0, ax0 + accent_w, y0 + 4), radius=2)
+    elif top_accent is not None:
+        accent_w = min(w - radius * 2, max(64, int(w * 0.42)))
+        ax0 = x0 + radius
+        c_end = BRAND_BLUE if top_accent == COL_CYAN else top_accent
+        _draw_gradient_bar(canvas, (ax0, y0, ax0 + accent_w, y0 + 4), c_left=top_accent, c_right=c_end, radius=2)
 
 
 def _pill(
@@ -336,8 +380,8 @@ def _pill(
     text: str,
     *,
     fg: tuple[int, int, int, int] = COL_CYAN,
-    bg: tuple[int, int, int, int] = (0, 229, 255, 32),
-    border: tuple[int, int, int, int] | None = (0, 229, 255, 115),
+    bg: tuple[int, int, int, int] = (84, 142, 255, 32),
+    border: tuple[int, int, int, int] | None = (118, 146, 255, 118),
     dot: tuple[int, int, int, int] | None = None,
     size: int = 17,
     pad_x: int = 16,
@@ -364,48 +408,134 @@ def _pill(
     return x0, x1
 
 
+@lru_cache(maxsize=12)
+def _load_admiral_logo(diameter: int, opacity: float = 1.0) -> Image.Image:
+    """Загрузить официальный неоновый логотип-трезубец ADMIRAL (или отрисовать векторно)."""
+    if LOGO_PATH.is_file():
+        try:
+            raw = Image.open(LOGO_PATH).convert("RGBA")
+            resized = raw.resize((diameter, diameter), Image.Resampling.LANCZOS)
+            if opacity < 0.999:
+                r, g, b, a = resized.split()
+                a = a.point(lambda v: int(round(v * opacity)))
+                resized = Image.merge("RGBA", (r, g, b, a))
+            return resized
+        except Exception:  # noqa: BLE001
+            pass
+
+    # Точный векторный резерв: неоновое кольцо + трезубец-стрела (#C424FF → #2269FF)
+    scale = 2
+    box = diameter * scale
+    grad = Image.new("RGBA", (box, box), (0, 0, 0, 0))
+    gpx = grad.load()
+    denom = max(1, (box - 1) * 2)
+    for yy in range(box):
+        for xx in range(box):
+            t = (xx + (box - 1 - yy)) / denom
+            cr = int(round(BRAND_PURPLE[0] + (BRAND_BLUE[0] - BRAND_PURPLE[0]) * t))
+            cg = int(round(BRAND_PURPLE[1] + (BRAND_BLUE[1] - BRAND_PURPLE[1]) * t))
+            cb = int(round(BRAND_PURPLE[2] + (BRAND_BLUE[2] - BRAND_PURPLE[2]) * t))
+            gpx[xx, yy] = (cr, cg, cb, int(round(255 * opacity)))
+
+    mask = Image.new("L", (box, box), 0)
+    md = ImageDraw.Draw(mask)
+    pad = int(box * 0.08)
+    ring_w = max(3, int(box * 0.045))
+    md.ellipse((pad, pad, box - pad, box - pad), outline=255, width=ring_w)
+
+    cx = box // 2
+    # Центральная стрела вверх
+    shaft_w = max(4, int(box * 0.085))
+    md.rectangle((cx - shaft_w // 2, int(box * 0.30), cx + shaft_w // 2, int(box * 0.76)), fill=255)
+    md.polygon(
+        [(cx, int(box * 0.16)), (int(box * 0.37), int(box * 0.34)), (int(box * 0.63), int(box * 0.34))], fill=255
+    )
+    # Нижний V-трезубец с боковыми зубцами
+    md.line([(cx, int(box * 0.78)), (int(box * 0.25), int(box * 0.48))], fill=255, width=shaft_w)
+    md.line([(cx, int(box * 0.78)), (int(box * 0.75), int(box * 0.48))], fill=255, width=shaft_w)
+    md.polygon(
+        [(int(box * 0.19), int(box * 0.46)), (int(box * 0.37), int(box * 0.46)), (int(box * 0.29), int(box * 0.56))],
+        fill=255,
+    )
+    md.polygon(
+        [(int(box * 0.81), int(box * 0.46)), (int(box * 0.63), int(box * 0.46)), (int(box * 0.71), int(box * 0.56))],
+        fill=255,
+    )
+
+    out = Image.new("RGBA", (box, box), (0, 0, 0, 0))
+    out.paste(grad, (0, 0), mask)
+    return out.resize((diameter, diameter), Image.Resampling.LANCZOS)
+
+
+@lru_cache(maxsize=8)
+def _load_exact_avatar_rgb(diameter: int) -> Image.Image | None:
+    """Точная копия исходного логотипа клуба из ``bot/assets/avatar.jpg``."""
+    avatar_path = ASSETS_DIR / "avatar.jpg"
+    if not avatar_path.is_file():
+        return None
+    try:
+        return Image.open(avatar_path).convert("RGB").resize((diameter, diameter), Image.Resampling.LANCZOS)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _draw_admiral_emblem(
     canvas: Image.Image,
     cx: int,
     cy: int,
     size: int = 34,
     color: tuple[int, int, int, int] = COL_CYAN,
+    *,
+    opacity: float = 1.0,
 ) -> None:
-    """Фирменная векторная эмблема ADMIRAL (двойной адмиральский шеврон в щите)."""
-    scale = 2
-    box = size * 2 * scale
-    layer = Image.new("RGBA", (box, box), (0, 0, 0, 0))
-    d = ImageDraw.Draw(layer)
-    m = box // 2
-    r = int(size * 0.92 * scale)
+    """Скопировать фирменный логотип ADMIRAL с центром в ``(cx, cy)`` без квадратной рамки."""
+    import math
 
-    pts = [
-        (m, m - r),
-        (m + int(r * 0.88), m - int(r * 0.45)),
-        (m + int(r * 0.88), m + int(r * 0.38)),
-        (m, m + r),
-        (m - int(r * 0.88), m + int(r * 0.38)),
-        (m - int(r * 0.88), m - int(r * 0.45)),
-    ]
-    d.polygon(pts, fill=(color[0], color[1], color[2], 42), outline=(color[0], color[1], color[2], 220), width=4)
+    _ = color
+    diameter = max(16, int(size * 2))
+    x0 = cx - diameter // 2
+    y0 = cy - diameter // 2
 
-    w1 = int(r * 0.52)
-    d.line(
-        [(m - w1, m + int(r * 0.16)), (m, m - int(r * 0.42)), (m + w1, m + int(r * 0.16))],
-        fill=COL_WHITE,
-        width=7,
-        joint="curve",
-    )
-    w2 = int(r * 0.34)
-    d.line(
-        [(m - w2, m + int(r * 0.46)), (m, m + int(r * 0.06)), (m + w2, m + int(r * 0.46))],
-        fill=color,
-        width=6,
-        joint="curve",
-    )
+    src_rgb = _load_exact_avatar_rgb(diameter)
+    if opacity >= 0.95 and src_rgb is not None:
+        patch = canvas.crop((x0, y0, x0 + diameter, y0 + diameter)).convert("RGB")
+        spx = src_rgb.load()
+        ppx = patch.load()
+        mid = (diameter - 1) / 2.0
+        max_r = diameter / 2.0
+        for yy in range(diameter):
+            for xx in range(diameter):
+                dist = math.hypot(xx - mid, yy - mid) / max_r
+                if dist >= 0.995:
+                    continue
+                sr, sg, sb = spx[xx, yy]
+                br, bg_c, bb = ppx[xx, yy]
+                if dist <= 0.77:
+                    # Внутри неонового кольца сохраняем 1:1 пиксели исходной картинки
+                    ppx[xx, yy] = (sr, sg, sb)
+                else:
+                    # За пределами кольца мягко сводим оригинальное неоновое свечение в фон (Screen blend)
+                    t = max(0.0, min(1.0, (dist - 0.77) / (0.995 - 0.77)))
+                    fade = 0.5 * (1.0 + math.cos(math.pi * t))
+                    # Плавный переход подложки от чёрного ядра к фону в зоне 0.77..0.85
+                    if dist < 0.85:
+                        k = (dist - 0.77) / 0.08
+                        br = int(round(br * k))
+                        bg_c = int(round(bg_c * k))
+                        bb = int(round(bb * k))
+                    lr = int(round(sr * fade))
+                    lg = int(round(sg * fade))
+                    lb = int(round(sb * fade))
+                    ppx[xx, yy] = (
+                        255 - ((255 - br) * (255 - lr)) // 255,
+                        255 - ((255 - bg_c) * (255 - lg)) // 255,
+                        255 - ((255 - bb) * (255 - lb)) // 255,
+                    )
+        canvas.paste(patch, (x0, y0))
+        return
 
-    smooth = layer.resize((size * 2, size * 2), Image.Resampling.LANCZOS)
-    canvas.paste(smooth, (cx - size, cy - size), smooth)
+    emblem = _load_admiral_logo(diameter, round(opacity, 2))
+    canvas.paste(emblem, (x0, y0), emblem)
 
 
 def _top_brand_bar(
@@ -416,15 +546,15 @@ def _top_brand_bar(
     right_badge: str,
     accent: tuple[int, int, int, int] = COL_CYAN,
 ) -> None:
-    """Верхняя фирменная полоса всех внутренних экранов."""
-    _draw_admiral_emblem(canvas, 74, 58, size=24, color=accent)
+    """Верхняя фирменная полоса всех внутренних экранов с логотипом ADMIRAL."""
+    _draw_admiral_emblem(canvas, 74, 58, size=29, color=accent)
     brand_font = _font("display", 22, 800)
     sub_font = _font("sans", 18, 600)
     name = clean_card_text(club.name).upper()
     city = clean_card_text(club.city).upper()
-    draw.text((110, 58), name, font=brand_font, fill=COL_WHITE, anchor="lm")
+    draw.text((114, 58), name, font=brand_font, fill=COL_WHITE, anchor="lm")
     nw = int(_text_width(draw, name, brand_font))
-    draw.text((110 + nw + 16, 58), f"·  {city}  ·  24/7", font=sub_font, fill=COL_MUTED, anchor="lm")
+    draw.text((114 + nw + 16, 58), f"·  {city}  ·  24/7", font=sub_font, fill=COL_MUTED, anchor="lm")
 
     _pill(
         draw,
@@ -476,9 +606,11 @@ def render_menu_card(
             glass,
             (48, 42, CARD_W - 48, 378),
             radius=28,
-            border=(0, 229, 255, 78),
-            top_accent=COL_CYAN,
+            border=(148, 96, 255, 96),
+            gradient_bar=True,
         )
+        # Мягкий фирменный водяной знак логотипа справа внутри hero-панели
+        _draw_admiral_emblem(canvas, 1086, 212, size=128, opacity=0.14)
         draw = ImageDraw.Draw(canvas, "RGBA")
 
         _pill(
@@ -487,9 +619,9 @@ def render_menu_card(
             72,
             f"CYBER LOUNGE · {club.city}",
             fg=COL_CYAN,
-            bg=(0, 229, 255, 30),
-            border=(0, 229, 255, 115),
-            dot=COL_GREEN,
+            bg=(64, 128, 255, 34),
+            border=(116, 148, 255, 125),
+            dot=COL_VIOLET,
         )
         if is_admin:
             role_badge = f"ADMIN · {role_title or 'ДОСТУП'}"
@@ -499,8 +631,8 @@ def render_menu_card(
                 72,
                 role_badge,
                 fg=COL_GOLD,
-                bg=(255, 206, 52, 34),
-                border=(255, 206, 52, 135),
+                bg=(196, 56, 255, 36),
+                border=(228, 92, 255, 145),
                 dot=COL_GOLD,
                 align_right=True,
             )
@@ -511,28 +643,30 @@ def render_menu_card(
                 72,
                 "ОТКРЫТО 24/7 · FACEIT",
                 fg=COL_GREEN,
-                bg=(0, 230, 118, 28),
-                border=(0, 230, 118, 110),
+                bg=(36, 232, 152, 28),
+                border=(36, 232, 152, 118),
                 dot=COL_GREEN,
                 align_right=True,
             )
 
-        _draw_admiral_emblem(canvas, 134, 206, size=48, color=COL_CYAN)
+        _draw_admiral_emblem(canvas, 140, 206, size=62, color=COL_VIOLET)
         title = clean_card_text(club.name).upper()
-        title_font = _fit_display_font(draw, title, max_w=920, start_size=74, min_size=42, weight=850)
+        title_font = _fit_display_font(draw, title, max_w=900, start_size=74, min_size=42, weight=850)
 
         glow = Image.new("RGBA", (CARD_W, CARD_H), (0, 0, 0, 0))
-        ImageDraw.Draw(glow).text((206, 144), title, font=title_font, fill=(0, 229, 255, 105))
-        glow = glow.filter(ImageFilter.GaussianBlur(15))
+        gd = ImageDraw.Draw(glow)
+        gd.text((216, 144), title, font=title_font, fill=(196, 36, 255, 96))
+        gd.text((222, 144), title, font=title_font, fill=(34, 105, 255, 96))
+        glow = glow.filter(ImageFilter.GaussianBlur(16))
         canvas.paste(glow, (0, 0), glow)
 
         draw = ImageDraw.Draw(canvas, "RGBA")
-        draw.text((206, 144), title, font=title_font, fill=COL_WHITE)
+        draw.text((218, 144), title, font=title_font, fill=COL_WHITE)
 
         sub_font = _font("sans", 24, 650)
         draw.text(
-            (208, 240),
-            _ellipsize(draw, f"Игровые залы про-уровня · 4 зоны · {club.hours}", sub_font, 940),
+            (220, 240),
+            _ellipsize(draw, f"Игровые залы про-уровня · 4 зоны · {club.hours}", sub_font, 920),
             font=sub_font,
             fill=COL_TEXT,
         )
@@ -649,8 +783,8 @@ def render_prices_card(club: ClubInfo) -> RenderedCard:
             glass,
             (48, 168, CARD_W - 48, 608),
             radius=26,
-            border=(0, 229, 255, 76),
-            top_accent=COL_CYAN,
+            border=(148, 96, 255, 92),
+            gradient_bar=True,
         )
         draw = ImageDraw.Draw(canvas, "RGBA")
 
@@ -707,8 +841,8 @@ def render_prices_card(club: ClubInfo) -> RenderedCard:
             glass,
             (48, 624, CARD_W - 48, 684),
             radius=18,
-            border=(255, 206, 52, 95),
-            fill_boost=(255, 190, 0, 22),
+            border=(196, 62, 255, 110),
+            fill_boost=(142, 42, 255, 26),
         )
         draw = ImageDraw.Draw(canvas, "RGBA")
         foot_font = _font("sans", 19, 700)
@@ -772,9 +906,9 @@ def render_wizard_card(
         for (num, name), rx in zip(steps, xs, strict=True):
             is_done = num < step
             if is_done:
-                c_bg, c_fg, c_border = (0, 230, 118, 42), COL_GREEN, COL_GREEN
+                c_bg, c_fg, c_border = (196, 56, 255, 48), COL_WHITE, COL_VIOLET
             elif num == step:
-                c_bg, c_fg, c_border = (0, 229, 255, 46), COL_WHITE, COL_CYAN
+                c_bg, c_fg, c_border = (52, 126, 255, 56), COL_WHITE, COL_CYAN
             else:
                 c_bg, c_fg, c_border = (255, 255, 255, 16), COL_MUTED, (255, 255, 255, 52)
 
@@ -783,7 +917,7 @@ def render_wizard_card(
                 ccx = rx + 20
                 draw.line(
                     [(ccx - 8, cy_bar), (ccx - 2, cy_bar + 6), (ccx + 9, cy_bar - 6)],
-                    fill=COL_GREEN,
+                    fill=COL_GOLD,
                     width=3,
                     joint="curve",
                 )
@@ -799,8 +933,12 @@ def render_wizard_card(
             line_x0 = spans[idx][1] + 22
             line_x1 = spans[idx + 1][0] - 22
             if line_x1 > line_x0:
-                line_col = COL_GREEN if step > idx + 1 else (255, 255, 255, 42)
-                draw.line([(line_x0, cy_bar), (line_x1, cy_bar)], fill=line_col, width=3)
+                if step > idx + 1:
+                    _draw_gradient_bar(canvas, (line_x0, cy_bar - 2, line_x1, cy_bar + 2), radius=2)
+                else:
+                    draw = ImageDraw.Draw(canvas, "RGBA")
+                    draw.line([(line_x0, cy_bar), (line_x1, cy_bar)], fill=(255, 255, 255, 42), width=3)
+        draw = ImageDraw.Draw(canvas, "RGBA")
 
         tariff = texts.get_tariff(tariff_key)
 
@@ -904,8 +1042,8 @@ def render_wizard_card(
             glass,
             (48, 210, CARD_W - 48, 676),
             radius=26,
-            border=(accent[0], accent[1], accent[2], 95),
-            top_accent=COL_GOLD if waiting_receipt else accent,
+            border=(148, 96, 255, 98),
+            gradient_bar=True,
         )
         draw = ImageDraw.Draw(canvas, "RGBA")
 
@@ -923,8 +1061,8 @@ def render_wizard_card(
                 244,
                 "ТРЕБУЕТСЯ ЧЕК ОПЛАТЫ",
                 fg=COL_GOLD,
-                bg=(255, 206, 52, 34),
-                border=(255, 206, 52, 130),
+                bg=(196, 56, 255, 38),
+                border=(228, 92, 255, 145),
                 dot=COL_GOLD,
                 align_right=True,
             )
@@ -999,16 +1137,17 @@ def render_ticket_card(club: ClubInfo, booking: Booking) -> RenderedCard:
         canvas = canvas.copy()
         draw = ImageDraw.Draw(canvas, "RGBA")
 
-        _top_brand_bar(canvas, draw, club, right_badge=f"TICKET #{booking.id:04d}", accent=COL_GREEN)
+        _top_brand_bar(canvas, draw, club, right_badge=f"TICKET #{booking.id:04d}", accent=COL_CYAN)
 
         _glass_panel(
             canvas,
             glass,
             (56, 118, CARD_W - 56, 660),
             radius=28,
-            border=(0, 230, 118, 102),
-            top_accent=COL_GREEN,
+            border=(148, 96, 255, 104),
+            gradient_bar=True,
         )
+        _draw_admiral_emblem(canvas, 1102, 520, size=104, opacity=0.11)
         draw = ImageDraw.Draw(canvas, "RGBA")
 
         status_map = {
@@ -1085,8 +1224,8 @@ def render_bookings_list_card(club: ClubInfo, bookings: Sequence[Booking], tz: Z
             glass,
             (48, 114, CARD_W - 48, 668),
             radius=26,
-            border=(0, 229, 255, 82),
-            top_accent=COL_CYAN,
+            border=(136, 98, 255, 92),
+            gradient_bar=True,
         )
         draw = ImageDraw.Draw(canvas, "RGBA")
         draw.text((84, 144), "ИСТОРИЯ ВАШИХ ЗАЯВОК", font=_font("display", 34, 850), fill=COL_WHITE)
@@ -1174,9 +1313,9 @@ def render_contacts_card(club: ClubInfo) -> RenderedCard:
         draw = ImageDraw.Draw(canvas, "RGBA")
         _top_brand_bar(canvas, draw, club, right_badge="КОНТАКТЫ И РЕКВИЗИТЫ", accent=COL_CYAN)
 
-        _glass_panel(canvas, glass, (48, 116, 650, 668), radius=26, border=(0, 229, 255, 86), top_accent=COL_CYAN)
+        _glass_panel(canvas, glass, (48, 116, 650, 668), radius=26, border=(84, 152, 255, 95), top_accent=COL_BLUE)
         _glass_panel(
-            canvas, glass, (674, 116, CARD_W - 48, 668), radius=26, border=(255, 206, 52, 92), top_accent=COL_GOLD
+            canvas, glass, (674, 116, CARD_W - 48, 668), radius=26, border=(196, 62, 255, 98), top_accent=COL_VIOLET
         )
         draw = ImageDraw.Draw(canvas, "RGBA")
 
@@ -1202,8 +1341,8 @@ def render_contacts_card(club: ClubInfo) -> RenderedCard:
             596,
             f"РЕЖИМ РАБОТЫ: {club.hours}",
             fg=COL_GREEN,
-            bg=(0, 230, 118, 30),
-            border=(0, 230, 118, 110),
+            bg=(36, 232, 152, 28),
+            border=(36, 232, 152, 115),
             dot=COL_GREEN,
         )
 
@@ -1278,9 +1417,11 @@ def render_info_card(
             glass,
             (48, 114, CARD_W - 48, 668),
             radius=28,
-            border=(accent[0], accent[1], accent[2], 88),
+            border=(accent[0], accent[1], accent[2], 92),
+            gradient_bar=accent in (COL_CYAN, COL_VIOLET, COL_GOLD),
             top_accent=accent,
         )
+        _draw_admiral_emblem(canvas, 1110, 224, size=94, opacity=0.09)
         draw = ImageDraw.Draw(canvas, "RGBA")
 
         t_lines = _wrap_lines(draw, title.upper(), _font("display", 33, 850), 1100, max_lines=2)
@@ -1522,7 +1663,12 @@ def render_admin_team_card(
         _top_brand_bar(canvas, draw, club, right_badge="КОМАНДА КЛУБА", accent=COL_GOLD)
 
         _glass_panel(
-            canvas, glass, (48, 112, CARD_W - 48, 672), radius=26, border=(255, 206, 52, 92), top_accent=COL_GOLD
+            canvas,
+            glass,
+            (48, 112, CARD_W - 48, 672),
+            radius=26,
+            border=(196, 62, 255, 96),
+            gradient_bar=True,
         )
         draw = ImageDraw.Draw(canvas, "RGBA")
 
@@ -1550,7 +1696,7 @@ def render_admin_team_card(
                     (84, by, CARD_W - 84, by + 128),
                     radius=20,
                     fill=(255, 255, 255, 16),
-                    outline=(255, 206, 52, 68),
+                    outline=(196, 62, 255, 76),
                     width=1,
                 )
                 draw.text((112, by + 20), st, font=_font("mono", 18, 800), fill=COL_GOLD)
@@ -1603,8 +1749,8 @@ def render_admin_team_card(
             150,
             f"АКТИВНЫХ: {active_cnt} ИЗ {len(admins)}",
             fg=COL_GOLD,
-            bg=(255, 206, 52, 32),
-            border=(255, 206, 52, 120),
+            bg=(196, 56, 255, 34),
+            border=(228, 92, 255, 130),
             dot=COL_GREEN,
             align_right=True,
         )
