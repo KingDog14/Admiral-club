@@ -67,6 +67,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="вывести готовые тексты About, Description и путь к картинке 640×360 для @BotFather",
     )
     parser.add_argument(
+        "--print-palette",
+        action="store_true",
+        help="показать 10-тоновую палитру inline-кнопок и правила поверхностей 60–30–10",
+    )
+    parser.add_argument(
         "--version",
         action="store_true",
         help="показать версию и выйти",
@@ -178,6 +183,9 @@ async def run_polling(cfg: AppConfig) -> None:
         )
         await _setup_bot_commands(bot, admin_ids)
         await _setup_bot_profile(bot, club)
+        from bot.ui.emoji_pack import sync_inline_emoji_pack
+
+        await sync_inline_emoji_pack(bot, owner_id=cfg.admin_id, club_name=club.name)
 
     @dispatcher.shutdown()
     async def on_shutdown() -> None:
@@ -210,6 +218,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.version:
         print(f"Telegram-бот кибер-клуба NOVA ARENA (демо), версия {__version__}")
+        return 0
+
+    if args.print_palette:
+        from bot.ui.palette import format_palette_summary
+
+        print(format_palette_summary())
         return 0
 
     if args.print_profile:

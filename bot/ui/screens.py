@@ -24,10 +24,20 @@ from aiogram.types import CopyTextButton, InlineKeyboardButton, InlineKeyboardMa
 
 from bot import texts
 from bot.db.models import BookingStatus
+from bot.ui.palette import (
+    FAQ_TONES,
+    RULES_TAB_TONES,
+    Surface,
+    Tone,
+    apply_tone_icon,
+)
 from bot.utils.formatting import escape_html
 
 _SUPPORTS_STYLE: Final[bool] = "style" in InlineKeyboardButton.model_fields
 _SUPPORTS_COPY: Final[bool] = "copy_text" in InlineKeyboardButton.model_fields
+_SUPPORTS_CUSTOM_EMOJI: Final[bool] = (
+    "icon_custom_emoji_id" in InlineKeyboardButton.model_fields
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -232,7 +242,12 @@ def status_tag(status: str) -> str:
 # --------------------------------------------------------------------------- #
 # Конструкторы кнопок и клавиатур
 # --------------------------------------------------------------------------- #
-ButtonSpec: TypeAlias = InlineKeyboardButton | tuple[str, str] | tuple[str, str, str]
+ButtonSpec: TypeAlias = (
+    InlineKeyboardButton
+    | tuple[str, str]
+    | tuple[str, str, str | None]
+    | tuple[str, str, str | None, str | None]
+)
 
 
 def btn(
@@ -240,13 +255,17 @@ def btn(
     callback_data: str | None = None,
     *,
     style: str | None = None,
+    tone: str | None = None,
     copy_value: str | None = None,
     url: str | None = None,
 ) -> InlineKeyboardButton:
-    """Собрать inline-кнопку с поддержкой цвета Bot API и ``CopyTextButton``."""
-    kwargs: dict[str, object] = {"text": text}
+    """Собрать inline-кнопку с поддержкой 10-тоновой палитры, ``style`` и ``CopyTextButton``."""
+    rendered_text, custom_emoji_id = apply_tone_icon(text, tone)
+    kwargs: dict[str, object] = {"text": rendered_text}
     if style and _SUPPORTS_STYLE:
         kwargs["style"] = style
+    if custom_emoji_id and _SUPPORTS_CUSTOM_EMOJI:
+        kwargs["icon_custom_emoji_id"] = custom_emoji_id
     if copy_value is not None and _SUPPORTS_COPY:
         kwargs["copy_text"] = CopyTextButton(text=copy_value)
     elif url is not None:
@@ -259,6 +278,9 @@ def btn(
 def _coerce_button(spec: ButtonSpec) -> InlineKeyboardButton:
     if isinstance(spec, InlineKeyboardButton):
         return spec
+    if len(spec) == 4:
+        text, data, style, tone = spec
+        return btn(text, data, style=style, tone=tone)
     if len(spec) == 3:
         text, data, style = spec
         return btn(text, data, style=style)
@@ -278,10 +300,10 @@ SCREEN_BACK: Final[str] = "back"
 
 
 def back_row(*, home: bool = True) -> list[ButtonSpec]:
-    """Служебная строка навигации: «◀ Назад» (+ цветная «🏠 В меню»)."""
-    row: list[ButtonSpec] = [(BTN_BACK, nav(SCREEN_BACK))]
+    """Спокойная служебная строка навигации на матовом стекле: «◀ Назад» и «🏠 В меню»."""
+    row: list[ButtonSpec] = [(BTN_BACK, nav(SCREEN_BACK), Surface.GLASS, Tone.SLATE)]
     if home:
-        row.append((BTN_HOME, nav(Screen.MENU), "primary"))
+        row.append((BTN_HOME, nav(Screen.MENU), Surface.GLASS, Tone.SLATE))
     return row
 
 
@@ -294,34 +316,37 @@ def footer_rows(
 
 
 def menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
-    """Главное меню клуба с многоцветными акцентами Bot API.
+    """Главное меню клуба по правилу 60–30–10 (богатая палитра без «гирлянды»).
 
-    * Первая строка — яркая зелёная CTA-кнопка «🎮 Забронировать место» (``success``).
-    * Ниже — симметричная цветная сетка разделов 2×3 (``primary``, ``success``, ``danger``).
-    * Кнопка «🛠 Админ-панель» добавляется только активным администраторам.
+    * 10 % (Hero ``success``): единственная главная CTA-кнопка «🎮 Забронировать место».
+    * 20 % (Accent ``primary``): симметричная ключевая пара «🖥 Залы и цены» | «📋 Мои брони».
+    * 70 % (Glass ``None``): спокойное матовое стекло с семантическими тонами
+      Amber / Indigo / Jade / Amethyst / Tangerine без ложных красных тревог.
     """
     rows: list[Sequence[ButtonSpec]] = [
-        [(BTN_BOOK_HERO, nav(Screen.BOOK_TARIFF), "success")],
+        [(BTN_BOOK_HERO, nav(Screen.BOOK_TARIFF), Surface.HERO, Tone.MINT)],
         [
-            ("🖥 Залы и цены", nav(Screen.PRICES), "primary"),
-            ("📋 Мои брони", nav(Screen.BOOKINGS), "primary"),
+            ("🖥 Залы и цены", nav(Screen.PRICES), Surface.ACCENT, Tone.CRYO),
+            ("📋 Мои брони", nav(Screen.BOOKINGS), Surface.ACCENT, Tone.SAPPHIRE),
         ],
         [
-            ("❓ FAQ", nav(Screen.FAQ), "primary"),
-            ("📜 Правила", nav(Screen.RULES)),
+            ("💡 Частые вопросы", nav(Screen.FAQ), Surface.GLASS, Tone.AMBER),
+            ("📘 Правила", nav(Screen.RULES), Surface.GLASS, Tone.INDIGO),
         ],
         [
-            ("📞 Контакты", nav(Screen.CONTACTS), "success"),
-            ("🛡 152-ФЗ", nav(Screen.PRIVACY), "danger"),
+            ("📍 Контакты", nav(Screen.CONTACTS), Surface.GLASS, Tone.JADE),
+            ("🛡 152-ФЗ", nav(Screen.PRIVACY), Surface.GLASS, Tone.AMETHYST),
         ],
     ]
     if is_admin:
-        rows.append([("🛠 Админ-панель", nav(Screen.ADMIN), "primary")])
+        rows.append(
+            [("🛠 Админ-панель", nav(Screen.ADMIN), Surface.GLASS, Tone.TANGERINE)]
+        )
     return keyboard(*rows)
 
 
 def rules_tabs_keyboard(active_tab: str) -> InlineKeyboardMarkup:
-    """Цветные вкладки раздела «Правила клуба» + переход к бронированию."""
+    """Переключатель вкладок «Правила клуба» (подсвечена только активная вкладка)."""
     tabs = [
         ("📌 Основное", texts.RULES_TAB_MAIN),
         ("💳 Оплата", texts.RULES_TAB_PAY),
@@ -331,37 +356,27 @@ def rules_tabs_keyboard(active_tab: str) -> InlineKeyboardMarkup:
         (
             f"• {label}" if key == active_tab else label,
             nav(Screen.RULES, key),
-            "success" if key == active_tab else "primary",
+            Surface.ACCENT if key == active_tab else Surface.GLASS,
+            RULES_TAB_TONES.get(key, Tone.INDIGO),
         )
         for label, key in tabs
     ]
     return footer_rows(
         tab_row,
-        [(BTN_BOOK_HERO, nav(Screen.BOOK_TARIFF), "success")],
+        [(BTN_BOOK_HERO, nav(Screen.BOOK_TARIFF), Surface.HERO, Tone.MINT)],
     )
 
 
-_FAQ_ITEM_STYLES: Final[dict[str, str]] = {
-    "night": "primary",
-    "packages": "",
-    "prepay": "success",
-    "payment": "success",
-    "pcs": "primary",
-    "faceit": "",
-    "late": "primary",
-    "scam": "danger",
-}
-
-
 def faq_list_keyboard() -> InlineKeyboardMarkup:
-    """Список вопросов с цветной подсветкой категорий: ответ открывается на месте."""
+    """Список частых вопросов на матовом стекле с 8 категорийными тонами палитры."""
     return footer_rows(
         *[
             (
                 (
                     f"{item.emoji} {item.question}",
                     nav(Screen.FAQ_ITEM, item.key),
-                    _FAQ_ITEM_STYLES.get(item.key, ""),
+                    Surface.GLASS,
+                    FAQ_TONES.get(item.key, Tone.SAPPHIRE),
                 ),
             )
             for item in texts.FAQ_ITEMS
@@ -370,8 +385,11 @@ def faq_list_keyboard() -> InlineKeyboardMarkup:
 
 
 def faq_answer_keyboard() -> InlineKeyboardMarkup:
-    """Экран ответа: цветной возврат к списку вопросов и в меню."""
-    return keyboard([("◀ К списку вопросов", nav(Screen.FAQ), "success")], back_row())
+    """Экран ответа FAQ: единый акцент возврата к списку и спокойный подвал."""
+    return keyboard(
+        [("◀ К списку вопросов", nav(Screen.FAQ), Surface.ACCENT, Tone.SAPPHIRE)],
+        back_row(),
+    )
 
 
 __all__ = [
