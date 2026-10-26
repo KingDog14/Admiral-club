@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Запуск Telegram-бота компьютерного клуба ADMIRAL.
+"""Запуск демонстрационного Telegram-бота кибер-клуба NOVA ARENA.
 
 Команды::
 
@@ -37,7 +37,7 @@ from bot.db.database import Database, init_database
 from bot.handlers import admin_router, client_router
 from bot.services.admins import AdminRegistry
 
-logger = logging.getLogger("admiral.bot")
+logger = logging.getLogger("nova.bot")
 
 #: Команды, видимые всем пользователям в меню клиента Telegram.
 #: Админ-панель открывается кнопкой в главном меню (её видят только
@@ -109,26 +109,42 @@ async def run_polling(cfg: AppConfig) -> None:
     # Реестр администраторов: проверка доступа по таблице admins без запроса
     # к базе на каждое сообщение. Передаётся в workflow_data как ``admins``.
     admins = AdminRegistry(database, cfg)
-    dispatcher = Dispatcher(storage=MemoryStorage(), db=database, cfg=cfg, admins=admins)
+    dispatcher = Dispatcher(
+        storage=MemoryStorage(), db=database, cfg=cfg, admins=admins
+    )
 
     # Админ-панель подключается первой: её хендлеры имеют приоритет.
     dispatcher.include_router(admin_router)
     dispatcher.include_router(client_router)
 
     @dispatcher.startup()
-    async def on_startup(bot: Bot, db: Database, cfg: AppConfig, admins: AdminRegistry) -> None:
+    async def on_startup(
+        bot: Bot, db: Database, cfg: AppConfig, admins: AdminRegistry
+    ) -> None:
         # Неверный токен — единственная причина остановить запуск сразу.
         me = await bot.get_me()  # TelegramUnauthorizedError при неверном BOT_TOKEN
-        logger.info("Бот @%s (id=%s) запущен, версия %s", me.username, me.id, __version__)
+        logger.info(
+            "Бот @%s (id=%s) запущен, версия %s", me.username, me.id, __version__
+        )
 
         # Синхронизируем ADMIN_IDS из .env с таблицей admins и читаем кэш.
         admin_ids = await admins.startup()
-        logger.info("Администраторов активно: %d — %s", len(admin_ids), ", ".join(map(str, admin_ids)) or "нет")
+        logger.info(
+            "Администраторов активно: %d — %s",
+            len(admin_ids),
+            ", ".join(map(str, admin_ids)) or "нет",
+        )
         logger.info("Владелец бота (первый ADMIN_IDS): id=%s", cfg.admin_id)
         logger.info("База данных: %s", db.path)
         logger.info("Часовой пояс клуба: %s", cfg.timezone)
         club = cfg.club
-        logger.info("Клуб: %s, %s — %s, работает %s", club.name, club.city, club.address, club.hours)
+        logger.info(
+            "Клуб: %s, %s — %s, работает %s",
+            club.name,
+            club.city,
+            club.address,
+            club.hours,
+        )
         logger.info(
             "Администратор: %s, телефон %s; предоплата: %s %s (%s)",
             club.admin_name,
@@ -151,7 +167,9 @@ async def run_polling(cfg: AppConfig) -> None:
     async def on_unhandled_error(event: ErrorEvent) -> None:
         """Логировать любую необработанную ошибку, не роняя polling."""
         update_id = getattr(event.update, "update_id", "?")
-        logger.exception("Необработанная ошибка в апдейте %s: %s", update_id, event.exception)
+        logger.exception(
+            "Необработанная ошибка в апдейте %s: %s", update_id, event.exception
+        )
 
     try:
         await dispatcher.start_polling(
@@ -171,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
     if args.version:
-        print(f"Telegram-бот ПК-клуба ADMIRAL, версия {__version__}")
+        print(f"Telegram-бот кибер-клуба NOVA ARENA (демо), версия {__version__}")
         return 0
 
     if args.init_db:
@@ -189,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     setup_logging(cfg.log_level)
-    logger.info("Запуск бота ПК-клуба ADMIRAL (версия %s)…", __version__)
+    logger.info("Запуск бота кибер-клуба %s (версия %s)…", cfg.club.name, __version__)
 
     try:
         asyncio.run(run_polling(cfg))

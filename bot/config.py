@@ -10,10 +10,10 @@
 
 Дополнительно можно переопределить ``DB_PATH``, ``TZ``, ``LOG_LEVEL``, а также
 сведения о клубе (:class:`ClubInfo`): название, город, адрес, часы работы, имя и
-телефон администратора, реквизиты для предоплаты. Значения по умолчанию — это
-реальные данные клуба ADMIRAL в Чите, так что бот работает «из коробки», а
-сменить администратора или реквизиты можно одной строкой в ``.env`` без правки
-кода.
+телефон администратора, реквизиты для предоплаты. По умолчанию подставлены
+полностью вымышленные демонстрационные данные клуба «NOVA ARENA», не связанные с
+каким-либо реальным заведением, а сменить их под свой проект можно через ``.env``
+без правки кода.
 
 ``.env`` задаёт лишь стартовый набор администраторов: остальных можно добавлять
 и отключать прямо в админ-панели, они хранятся в таблице ``admins`` базы данных.
@@ -29,26 +29,26 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 
-# Корень проекта (…/Admiral-club) — от него считаем пути к .env и базе данных.
+# Корень проекта — от него считаем пути к .env и базе данных.
 BASE_DIR: Path = Path(__file__).resolve().parent.parent
 ENV_FILE: Path = BASE_DIR / ".env"
-DEFAULT_DB_PATH: Path = BASE_DIR / "data" / "admiral.db"
-DEFAULT_TZ: str = "Asia/Chita"  # клуб в Чите (Забайкальский край), UTC+9
+DEFAULT_DB_PATH: Path = BASE_DIR / "data" / "nova_demo.db"
+DEFAULT_TZ: str = "Europe/Moscow"
 DEFAULT_LOG_LEVEL: str = "INFO"
 
-# --- Сведения о клубе по умолчанию (реальные данные, меняются через .env) ---- #
-DEFAULT_CLUB_NAME: str = "ADMIRAL"
-DEFAULT_CLUB_CITY: str = "Чита"
-DEFAULT_CLUB_ADDRESS: str = "ул. Подгорбунского, 37 (2 помещение, 1 этаж, вход с торца)"
+# --- Вымышленные демо-данные клуба по умолчанию (меняются через .env) -------- #
+DEFAULT_CLUB_NAME: str = "NOVA ARENA"
+DEFAULT_CLUB_CITY: str = "Неополис"
+DEFAULT_CLUB_ADDRESS: str = "пр-т Кибернетиков, 42 (ТЦ «Орион», 3 этаж)"
 DEFAULT_CLUB_HOURS: str = "круглосуточно, 24/7"
-#: Имя администратора — того, кого назначит владелец клуба.
-DEFAULT_ADMIN_NAME: str = "Администратор клуба"
-#: Телефон клуба (по нему просят звонить при любых сомнениях).
-DEFAULT_ADMIN_PHONE: str = "+7 999 299-35-35"
-#: Реквизиты предоплаты: единый номер клуба, только Сбербанк.
-DEFAULT_PAYMENT_SYSTEM: str = "Сбербанк"
-DEFAULT_PAYMENT_CARD: str = "+79143618141"
-DEFAULT_PAYMENT_HOLDER: str = "Тимур В."
+#: Имя администратора смены (демонстрационное значение).
+DEFAULT_ADMIN_NAME: str = "Дежурный администратор (демо)"
+#: Контактный телефон демо-клуба.
+DEFAULT_ADMIN_PHONE: str = "+7 (900) 000-42-42"
+#: Вымышленные демо-реквизиты предоплаты.
+DEFAULT_PAYMENT_SYSTEM: str = "Демо-Банк (СБП)"
+DEFAULT_PAYMENT_CARD: str = "+7 (900) 000-77-88"
+DEFAULT_PAYMENT_HOLDER: str = "Алексей Н. (демо)"
 
 
 class ConfigError(RuntimeError):
@@ -68,9 +68,9 @@ class ClubInfo:
     """Сведения о клубе: контакты, адрес, реквизиты предоплаты.
 
     Всё читается из ``.env`` (``CLUB_*``, ``ADMIN_NAME``, ``ADMIN_PHONE``,
-    ``PAYMENT_*``) с значениями по умолчанию — реальными данными клуба ADMIRAL.
-    Подставляется в тексты через :meth:`as_dict`, поэтому смена администратора
-    или реквизитов не требует правки кода.
+    ``PAYMENT_*``) с демонстрационными значениями по умолчанию.
+    Подставляется в тексты через :meth:`as_dict`, поэтому смена параметров клуба
+    не требует правки кода.
     """
 
     name: str = DEFAULT_CLUB_NAME
@@ -85,7 +85,7 @@ class ClubInfo:
 
     @property
     def admin_phone_raw(self) -> str:
-        """Номер телефона в формате ``+79992993535`` — для кнопки-контакта."""
+        """Номер телефона в формате ``+79000004242`` — для кнопки-контакта."""
         digits = re.sub(r"\D", "", self.admin_phone)
         if len(digits) == 11 and digits.startswith("8"):
             digits = "7" + digits[1:]
@@ -93,7 +93,7 @@ class ClubInfo:
 
     @property
     def place(self) -> str:
-        """Название клуба с городом: «ADMIRAL (Чита)»."""
+        """Название клуба с городом: «NOVA ARENA (Неополис)»."""
         return f"{self.name} ({self.city})" if self.city else self.name
 
     def as_dict(self) -> dict[str, str]:
@@ -196,7 +196,9 @@ def _read_admin_ids() -> tuple[int, ...]:
             admin_ids.append(value)
 
     if not admin_ids:
-        raise ConfigError(f"{variable} заполнен, но не содержит ни одного ID. {_ID_HINT}")
+        raise ConfigError(
+            f"{variable} заполнен, но не содержит ни одного ID. {_ID_HINT}"
+        )
     return tuple(admin_ids)
 
 
@@ -225,7 +227,9 @@ def _read_log_level() -> str:
     raw = (os.getenv("LOG_LEVEL") or "").strip().upper() or DEFAULT_LOG_LEVEL
     allowed = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}
     if raw not in allowed:
-        raise ConfigError(f"LOG_LEVEL должен быть одним из {sorted(allowed)}, получено: {raw!r}")
+        raise ConfigError(
+            f"LOG_LEVEL должен быть одним из {sorted(allowed)}, получено: {raw!r}"
+        )
     return raw
 
 

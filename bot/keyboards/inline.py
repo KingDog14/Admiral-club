@@ -233,7 +233,9 @@ def parse_admin_list_page(data: str | None) -> int | None:
 _SUPPORTS_STYLE: bool = "style" in InlineKeyboardButton.model_fields
 
 
-def _btn(text: str, callback_data: str, *, style: str | None = None) -> InlineKeyboardButton:
+def _btn(
+    text: str, callback_data: str, *, style: str | None = None
+) -> InlineKeyboardButton:
     """Собрать кнопку с нативным цветовым акцентом Bot API (если поддерживается)."""
     if style and _SUPPORTS_STYLE:
         return InlineKeyboardButton(text=text, callback_data=callback_data, style=style)
@@ -273,10 +275,10 @@ def revoke_confirm_keyboard() -> InlineKeyboardMarkup:
 def payment_choice_keyboard(prepayment_required: bool) -> InlineKeyboardMarkup:
     """Шаг 4: как оплатить — прислать чек или заплатить на месте."""
     rows: list[list[InlineKeyboardButton]] = [
-        [_btn("📸 Оплатил — отправить чек", CB_PAY_CHECK, style="primary")],
+        [_btn("📸 Оплатил — отправить чек", CB_PAY_CHECK, style="success")],
     ]
     if not prepayment_required:
-        rows.append([_btn("💵 Оплачу на месте", CB_PAY_SPOT)])
+        rows.append([_btn("💵 Оплачу на месте", CB_PAY_SPOT, style="primary")])
     rows.append([_cancel_button()])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -290,10 +292,32 @@ def booking_cancel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[_cancel_button()]])
 
 
+_TARIFF_STYLES: dict[str, str] = {
+    "standart": "success",
+    "vip": "primary",
+    "svip": "danger",
+    "double": "primary",
+}
+
+_TIME_STYLES: dict[str, str] = {
+    "now": "success",
+    "morning": "primary",
+    "day": "primary",
+    "night": "success",
+    "other": "primary",
+}
+
+
 def tariffs_keyboard() -> InlineKeyboardMarkup:
     """Шаг 1 бронирования: Standart, VIP, S VIP, Double."""
     rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(text=tariff_button_label(tariff), callback_data=tariff_callback(tariff.key))]
+        [
+            _btn(
+                tariff_button_label(tariff),
+                tariff_callback(tariff.key),
+                style=_TARIFF_STYLES.get(tariff.key, "primary"),
+            )
+        ]
         for tariff in TARIFFS
     ]
     rows.append([_cancel_button()])
@@ -303,7 +327,7 @@ def tariffs_keyboard() -> InlineKeyboardMarkup:
 def time_slots_keyboard() -> InlineKeyboardMarkup:
     """Шаг 2 бронирования: «Сейчас», «На ночь», «Другое»."""
     rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton(text=label, callback_data=time_callback(key))]
+        [_btn(label, time_callback(key), style=_TIME_STYLES.get(key, "primary"))]
         for key, label in TIME_CHOICES
     ]
     rows.append([_cancel_button()])
@@ -315,7 +339,11 @@ def booking_decision_keyboard(booking_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                _btn("✅ Подтвердить", admin_approve_callback(booking_id), style="success"),
+                _btn(
+                    "✅ Подтвердить",
+                    admin_approve_callback(booking_id),
+                    style="success",
+                ),
                 _btn("❌ Отклонить", admin_reject_callback(booking_id), style="danger"),
             ]
         ]
@@ -326,15 +354,9 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
     """Панель под сообщением со статистикой (/admin)."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="📋 Активные брони", callback_data=admin_list_callback(0)
-                )
-            ],
-            [InlineKeyboardButton(text="👥 Администраторы", callback_data=CB_ADMIN_ADMINS)],
-            [
-                InlineKeyboardButton(text="🔄 Обновить статистику", callback_data=CB_ADMIN_STATS)
-            ],
+            [_btn("📋 Активные брони", admin_list_callback(0), style="success")],
+            [_btn("👥 Администраторы", CB_ADMIN_ADMINS, style="primary")],
+            [_btn("🔄 Обновить статистику", CB_ADMIN_STATS, style="primary")],
         ]
     )
 
@@ -342,9 +364,7 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
 def admin_add_cancel_keyboard() -> InlineKeyboardMarkup:
     """Клавиатура под запросом ID нового администратора."""
     return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="❌ Отменить", callback_data=CB_ADMIN_ADD_CANCEL)]
-        ]
+        inline_keyboard=[[_btn("❌ Отменить", CB_ADMIN_ADD_CANCEL, style="danger")]]
     )
 
 
@@ -353,10 +373,10 @@ def admins_nav_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="➕ Добавить", callback_data=CB_ADMIN_ADD),
-                InlineKeyboardButton(text="🔄 Обновить", callback_data=CB_ADMIN_ADMINS),
+                _btn("➕ Добавить", CB_ADMIN_ADD, style="success"),
+                _btn("🔄 Обновить", CB_ADMIN_ADMINS, style="primary"),
             ],
-            [InlineKeyboardButton(text="📊 Статистика", callback_data=CB_ADMIN_STATS)],
+            [_btn("📊 Статистика", CB_ADMIN_STATS, style="primary")],
         ]
     )
 
@@ -375,9 +395,7 @@ def admins_list_keyboard(
     """
     if not viewer_is_owner:
         return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📊 Статистика", callback_data=CB_ADMIN_STATS)]
-            ]
+            inline_keyboard=[[_btn("📊 Статистика", CB_ADMIN_STATS, style="primary")]]
         )
 
     rows: list[list[InlineKeyboardButton]] = []
@@ -386,31 +404,29 @@ def admins_list_keyboard(
             continue  # защищённый владелец из .env — кнопок не даём
         rows.append(
             [
-                InlineKeyboardButton(
-                    text="✅ Включить" if not admin.is_active else "⛔️ Отключить",
-                    callback_data=admin_toggle_callback(admin.user_id),
+                _btn(
+                    "✅ Включить" if not admin.is_active else "⛔️ Отключить",
+                    admin_toggle_callback(admin.user_id),
+                    style="success" if not admin.is_active else "danger",
                 ),
-                InlineKeyboardButton(
-                    text="👤 Оператор" if admin.is_owner else "👑 Владелец",
-                    callback_data=(
-                        admin_demote_callback(admin.user_id)
-                        if admin.is_owner
-                        else admin_promote_callback(admin.user_id)
-                    ),
+                _btn(
+                    "👤 Оператор" if admin.is_owner else "👑 Владелец",
+                    admin_demote_callback(admin.user_id)
+                    if admin.is_owner
+                    else admin_promote_callback(admin.user_id),
+                    style="primary",
                 ),
-                InlineKeyboardButton(
-                    text="🗑 Удалить", callback_data=admin_delete_callback(admin.user_id)
-                ),
+                _btn("🗑 Удалить", admin_delete_callback(admin.user_id), style="danger"),
             ]
         )
 
     rows.append(
         [
-            InlineKeyboardButton(text="➕ Добавить", callback_data=CB_ADMIN_ADD),
-            InlineKeyboardButton(text="🔄 Обновить", callback_data=CB_ADMIN_ADMINS),
+            _btn("➕ Добавить", CB_ADMIN_ADD, style="success"),
+            _btn("🔄 Обновить", CB_ADMIN_ADMINS, style="primary"),
         ]
     )
-    rows.append([InlineKeyboardButton(text="📊 Статистика", callback_data=CB_ADMIN_STATS)])
+    rows.append([_btn("📊 Статистика", CB_ADMIN_STATS, style="primary")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -422,11 +438,11 @@ def pending_list_keyboard(
     """Кнопки решения по каждой заявке + навигация по страницам списка."""
     rows: list[list[InlineKeyboardButton]] = [
         [
-            InlineKeyboardButton(
-                text=f"✅ №{booking.id}", callback_data=admin_approve_callback(booking.id)
+            _btn(
+                f"✅ №{booking.id}", admin_approve_callback(booking.id), style="success"
             ),
-            InlineKeyboardButton(
-                text=f"❌ №{booking.id}", callback_data=admin_reject_callback(booking.id)
+            _btn(
+                f"❌ №{booking.id}", admin_reject_callback(booking.id), style="danger"
             ),
         ]
         for booking in bookings
@@ -436,32 +452,19 @@ def pending_list_keyboard(
     if pages > 1:
         if page > 0:
             navigation.append(
-                InlineKeyboardButton(text="⬅️ Назад", callback_data=admin_list_callback(page - 1))
+                _btn("⬅️ Назад", admin_list_callback(page - 1), style="primary")
             )
         if page < pages - 1:
             navigation.append(
-                InlineKeyboardButton(text="➡️ Вперёд", callback_data=admin_list_callback(page + 1))
+                _btn("➡️ Вперёд", admin_list_callback(page + 1), style="primary")
             )
-    navigation.append(InlineKeyboardButton(text="📊 Статистика", callback_data=CB_ADMIN_STATS))
+    navigation.append(_btn("📊 Статистика", CB_ADMIN_STATS, style="primary"))
     rows.append(navigation)
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 __all__ = [
-    "CB_CONSENT_REVOKE",
-    "CB_CONSENT_REVOKE_NO",
-    "CB_CONSENT_REVOKE_YES",
-    "CB_PAY_CHECK",
-    "CB_PAY_PREFIX",
-    "CB_PAY_SPOT",
-    "CONSENT_CALLBACKS",
-    "PAY_WAY_CHECK",
-    "PAY_WAY_SPOT",
-    "parse_payment_way",
-    "payment_choice_keyboard",
-    "privacy_keyboard",
-    "revoke_confirm_keyboard",
     "ADMIN_CALLBACK_PREFIXES",
     "BOOKING_CALLBACK_PREFIXES",
     "CANCEL_BUTTON_TEXT",
@@ -479,8 +482,17 @@ __all__ = [
     "CB_BOOKING_BACK",
     "CB_BOOKING_CANCEL",
     "CB_CONSENT_GIVE",
-    "CB_TIME_PREFIX",
+    "CB_CONSENT_REVOKE",
+    "CB_CONSENT_REVOKE_NO",
+    "CB_CONSENT_REVOKE_YES",
+    "CB_PAY_CHECK",
+    "CB_PAY_PREFIX",
+    "CB_PAY_SPOT",
     "CB_TARIFF_PREFIX",
+    "CB_TIME_PREFIX",
+    "CONSENT_CALLBACKS",
+    "PAY_WAY_CHECK",
+    "PAY_WAY_SPOT",
     "PENDING_PAGE_SIZE",
     "admin_add_cancel_keyboard",
     "admin_approve_callback",
@@ -501,9 +513,13 @@ __all__ = [
     "parse_admin_list_page",
     "parse_admin_role",
     "parse_admin_toggle",
+    "parse_payment_way",
     "parse_tariff_key",
     "parse_time_key",
+    "payment_choice_keyboard",
     "pending_list_keyboard",
+    "privacy_keyboard",
+    "revoke_confirm_keyboard",
     "tariff_callback",
     "tariffs_keyboard",
     "time_callback",

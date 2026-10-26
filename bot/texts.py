@@ -1,22 +1,23 @@
-"""Все тексты бота в одном месте.
+"""Все тексты демонстрационного бота кибер-клуба «NOVA ARENA».
 
-Здесь собраны: сведения о тарифах и пакетах (реальные цены клуба ADMIRAL, Чита),
-шаблоны сообщений клиента и администратора, тексты про 152-ФЗ и конструкторы
-длинных текстов (прайс, правила, частые вопросы, контакты).
+Здесь собраны: демонстрационная сетка тарифов и пакетов (вымышленные цены без
+привязки к конкретному клубу), шаблоны сообщений клиента и администратора,
+тексты про 152-ФЗ и конструкторы длинных разделов (прайс, правила, частые
+вопросы, контакты).
 
 Данные клуба (город, адрес, телефон администратора, реквизиты предоплаты) в
 тексты не зашиты: шаблоны содержат плейсхолдеры ``{club_*}``, ``{admin_*}``,
 ``{payment_*}``, а подставляет их :func:`render` из :class:`bot.config.ClubInfo`
-(значения берутся из ``.env``). Так смена администратора или реквизитов — это
-правка одной строки в ``.env``, а не поиск по коду.
+(значения берутся из ``.env``). Так смена названия, контактов или реквизитов —
+это правка ``.env``, а не поиск по коду.
 
-Цены и правила приведены по прайсу и закреплённому сообщению клуба:
+Демонстрационная модель тарифов и правил:
 
-* Standart — 12 ПК, VIP — 6 ПК, S VIP — 10 ПК, Double — парные комнаты;
+* Standart — 16 ПК, VIP — 10 ПК, S VIP — 5 ПК, Double — приватная парная (2 ПК);
 * ночной пакет — с 22:00 до 08:00, утро — 8:00–13:00, день — 13:00–17:00;
 * предоплата берётся **только на ночные пакеты и только в выходные (ПТ–ВС)**;
-* для предоплаты у клуба **единый номер** (Сбербанк), вопросы по деньгам
-  обсуждаются только в общей группе — так клуб защищается от мошенников.
+* для предоплаты используются единые реквизиты из ``.env``, вопросы по оплате
+  не ведутся через сторонние личные аккаунты — защита гостей от мошенников.
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ from datetime import date
 from bot.config import ClubInfo
 
 # ---------------------------------------------------------------------------
-# Тарифы и временные пакеты (реальные данные клуба)
+# Тарифы и временные пакеты (вымышленные демо-данные)
 # ---------------------------------------------------------------------------
 
 #: Ночной пакет — с 22:00 до 08:00 (оплачивается целиком).
@@ -64,68 +65,68 @@ class Tariff:
         return self.night_weekend if is_weekend(day) else self.night
 
     def header(self) -> str:
-        """Шапка тарифа в прайсе: «💻 STANDART (12 PC)»."""
+        """Шапка тарифа в прайсе: «🟢 STANDART (16 PC)»."""
         suffix = f" ({self.pcs} PC)" if self.pcs else ""
         return f"{self.emoji} {self.title.upper()}{suffix}"
 
 
-#: Тарифы клуба — цены из прайса ADMIRAL (Чита) от 22.10.2026.
+#: Демонстрационные тарифы вымышленного кибер-клуба «NOVA ARENA».
 TARIFFS: tuple[Tariff, ...] = (
     Tariff(
         key="standart",
         title="Standart",
-        emoji="💻",
-        pcs=12,
-        hour1=150,
-        hour3=420,
-        hour5=650,
-        morning=400,
-        day=550,
-        night=600,
+        emoji="🟢",
+        pcs=16,
+        hour1=120,
+        hour3=320,
+        hour5=500,
+        morning=350,
+        day=450,
+        night=550,
         night_weekend=650,
-        description="Общий зал, 12 ПК",
+        description="Общий зал, 16 ПК",
     ),
     Tariff(
         key="vip",
         title="VIP",
-        emoji="👑",
-        pcs=6,
-        hour1=190,
-        hour3=530,
-        hour5=780,
-        morning=500,
-        day=600,
-        night=850,
-        night_weekend=900,
-        description="VIP-зал, 6 ПК",
+        emoji="🟠",
+        pcs=10,
+        hour1=170,
+        hour3=460,
+        hour5=700,
+        morning=480,
+        day=620,
+        night=750,
+        night_weekend=850,
+        description="VIP-зал, 10 ПК",
     ),
     Tariff(
         key="svip",
         title="S VIP",
-        emoji="👑👑",
-        pcs=10,
-        hour1=210,
-        hour3=580,
-        hour5=880,
-        morning=600,
-        day=700,
-        night=900,
-        night_weekend=950,
-        description="Зал S VIP, 10 ПК",
+        emoji="🔥",
+        pcs=5,
+        hour1=230,
+        hour3=620,
+        hour5=950,
+        morning=650,
+        day=800,
+        night=980,
+        night_weekend=1100,
+        description="Буткемп S VIP, 5 ПК",
     ),
     Tariff(
         key="double",
         title="Double",
-        emoji="👑👑👑",
-        pcs=None,
-        hour1=240,
-        hour3=650,
-        hour5=950,
-        morning=700,
-        day=850,
-        night=950,
-        night_weekend=1000,
-        description="Дабл-комната — два ПК рядом",
+        emoji="💎",
+        pcs=2,
+        hour1=280,
+        hour3=750,
+        hour5=1150,
+        morning=780,
+        day=950,
+        night=1150,
+        night_weekend=1300,
+        description="Приватная парная комната, 2 ПК",
     ),
 )
 
@@ -149,7 +150,7 @@ class FaqItem:
     answer: str
 
 
-#: Вопросы и ответы — по реальной практике клуба (переписка «ADMIRAL | Бронирование»).
+#: Демонстрационные частые вопросы кибер-клуба.
 FAQ_ITEMS: tuple[FaqItem, ...] = (
     FaqItem(
         key="night",
@@ -237,8 +238,8 @@ def build_pcs_block() -> str:
     """Список залов с количеством ПК — подставляется в ответ FAQ «{pcs}»."""
     return "\n".join(
         f"• {tariff.title} — {tariff.pcs} ПК"
-        if tariff.pcs
-        else "• Double — парная комната (два ПК рядом)"
+        if tariff.key != "double" and tariff.pcs
+        else "• Double — приватная парная комната (2 ПК рядом)"
         for tariff in TARIFFS
     )
 
@@ -706,7 +707,7 @@ _RULES_TEMPLATE: str = "📜 <b>ПРАВИЛА КЛУБА {club_name}</b>\n\n" +
 
 _CONTACTS_BODY: str = (
     "👤 Ответит: <b>{admin_name}</b>\n"
-    "📱 Телефон клуба: <b><a href=\"tel:{admin_phone_raw}\">{admin_phone}</a></b>\n"
+    '📱 Телефон клуба: <b><a href="tel:{admin_phone_raw}">{admin_phone}</a></b>\n'
     "📍 Адрес: {club_address}\n"
     "🕒 Работаем: {club_hours}\n"
     "💳 Предоплата (ночные пакеты в ПТ–ВС): {payment_system} {payment_card} "
@@ -738,9 +739,7 @@ ADMIN_NO_ACCESS: str = (
 )
 
 #: Короткое сообщение для всплывающего окна (лимит Telegram — 200 символов).
-ADMIN_NO_ACCESS_ALERT: str = (
-    "⛔️ Этот экран доступен только администраторам клуба."
-)
+ADMIN_NO_ACCESS_ALERT: str = "⛔️ Этот экран доступен только администраторам клуба."
 
 # ---------------------------------------------------------------------------
 # Сценарий бронирования
@@ -785,7 +784,7 @@ ENTER_NAME: str = (
     "\n"
     "Напишите имя, на которое оформить бронь — по нему администратор найдёт "
     "вас в клубе.\n"
-    "Например: «Иван» или «Тимур».\n"
+    "Например: «Иван» или «Алексей».\n"
     "\n"
     "⏰ От 2 до 40 символов, только буквы. Отмена — /cancel."
 )
@@ -1287,7 +1286,7 @@ DECISION_WORD_REJECTED: str = "отклонил"
 SCREEN_MENU_BODY: str = (
     "<blockquote>📍 <b>{club_city}</b>, {club_address}\n"
     "🕒 {club_hours}  ·  🎮 FACEIT во всех залах\n"
-    "📞 <a href=\"tel:{admin_phone_raw}\">{admin_phone}</a> ({admin_name})</blockquote>\n"
+    '📞 <a href="tel:{admin_phone_raw}">{admin_phone}</a> ({admin_name})</blockquote>\n'
     "💵 Будни и день — оплата на месте · ПТ–ВС ночь — по предоплате."
 )
 
@@ -1336,7 +1335,7 @@ SCREEN_RULES_CLUB: str = (
 )
 
 SCREEN_CONTACTS_CARD_BODY: str = (
-    "<blockquote>📱 <b><a href=\"tel:{admin_phone_raw}\">{admin_phone}</a></b> — {admin_name}\n"
+    '<blockquote>📱 <b><a href="tel:{admin_phone_raw}">{admin_phone}</a></b> — {admin_name}\n'
     "📍 г. {club_city}, {club_address}\n"
     "🕒 Режим работы: <b>{club_hours}</b></blockquote>\n"
     "💳 <b>Реквизиты (ночь в ПТ–ВС):</b> {payment_system} <code>{payment_card}</code> ({payment_holder})\n"
@@ -1349,13 +1348,11 @@ SCREEN_BOOKINGS_EMPTY: str = (
 )
 
 SCREEN_BOOKINGS_ITEM: str = (
-    "<b>№{number}</b> · <b>{tariff}</b> · {time_slot}\n"
-    "   🕒 {created} — {status}"
+    "<b>№{number}</b> · <b>{tariff}</b> · {time_slot}\n   🕒 {created} — {status}"
 )
 
 SCREEN_BOOK_TARIFF_BODY: str = (
-    "Выберите игровой зал:\n\n"
-    "<blockquote>{tariffs_overview}</blockquote>"
+    "Выберите игровой зал:\n\n<blockquote>{tariffs_overview}</blockquote>"
 )
 
 SCREEN_BOOK_TIME_BODY: str = (
