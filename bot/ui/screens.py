@@ -1,6 +1,6 @@
 """Экраны графического интерфейса: идентификаторы, кнопки и подписи.
 
-Интерфейс бота построен на графических фото-карточках клуба ADMIRAL:
+Интерфейс бота построен на графических фото-карточках демо-клуба NOVA ARENA:
 
 * у пользователя всегда **ровно один** актуальный экран в чате — бот отправляет
   фото-карточку один раз (``sendPhoto``) и при всех переходах обновляет её на
@@ -9,9 +9,9 @@
   вся визуальная подача (тарифная сетка, шаги брони, билет, дашборд админа)
   отрисована на HD-карточках (:mod:`bot.ui.cards`), а подпись использует чистую
   HTML-вёрстку Telegram (``<blockquote>``, ``<b>``, ``<code>``);
-* ключевые кнопки выделены нативными цветами Bot API (``primary``, ``success``,
-  ``danger``), а реквизиты и телефон снабжены кнопками копирования в один тап
-  (:class:`aiogram.types.CopyTextButton`).
+* кнопки на всех экранах раскрашены нативными цветами Bot API (``success``,
+  ``primary``, ``danger``), а реквизиты и телефон снабжены кнопками копирования
+  в один тап (:class:`aiogram.types.CopyTextButton`).
 """
 
 from __future__ import annotations
@@ -115,7 +115,7 @@ SCREEN_TITLES: Final[dict[str, str]] = {
 }
 
 SCREEN_ICONS: Final[dict[str, str]] = {
-    Screen.MENU: "🔱",
+    Screen.MENU: "🔥",
     Screen.PRICES: "🖥",
     Screen.RULES: "📜",
     Screen.FAQ: "❓",
@@ -232,11 +232,7 @@ def status_tag(status: str) -> str:
 # --------------------------------------------------------------------------- #
 # Конструкторы кнопок и клавиатур
 # --------------------------------------------------------------------------- #
-ButtonSpec: TypeAlias = (
-    InlineKeyboardButton
-    | tuple[str, str]
-    | tuple[str, str, str]
-)
+ButtonSpec: TypeAlias = InlineKeyboardButton | tuple[str, str] | tuple[str, str, str]
 
 
 def btn(
@@ -282,10 +278,10 @@ SCREEN_BACK: Final[str] = "back"
 
 
 def back_row(*, home: bool = True) -> list[ButtonSpec]:
-    """Служебная строка навигации: «◀ Назад» (+ «🏠 В меню»)."""
+    """Служебная строка навигации: «◀ Назад» (+ цветная «🏠 В меню»)."""
     row: list[ButtonSpec] = [(BTN_BACK, nav(SCREEN_BACK))]
     if home:
-        row.append((BTN_HOME, nav(Screen.MENU)))
+        row.append((BTN_HOME, nav(Screen.MENU), "primary"))
     return row
 
 
@@ -298,25 +294,34 @@ def footer_rows(
 
 
 def menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
-    """Главное меню клуба.
+    """Главное меню клуба с многоцветными акцентами Bot API.
 
-    * Первая строка — широкая акцентная кнопка «🎮 Забронировать место» (``primary``).
-    * Ниже — симметричная сетка разделов 2×3.
+    * Первая строка — яркая зелёная CTA-кнопка «🎮 Забронировать место» (``success``).
+    * Ниже — симметричная цветная сетка разделов 2×3 (``primary``, ``success``, ``danger``).
     * Кнопка «🛠 Админ-панель» добавляется только активным администраторам.
     """
     rows: list[Sequence[ButtonSpec]] = [
-        [(BTN_BOOK_HERO, nav(Screen.BOOK_TARIFF), "primary")],
-        [("🖥 Залы и цены", nav(Screen.PRICES)), ("📋 Мои брони", nav(Screen.BOOKINGS))],
-        [("❓ FAQ", nav(Screen.FAQ)), ("📜 Правила", nav(Screen.RULES))],
-        [("📞 Контакты", nav(Screen.CONTACTS)), ("🛡 152-ФЗ", nav(Screen.PRIVACY))],
+        [(BTN_BOOK_HERO, nav(Screen.BOOK_TARIFF), "success")],
+        [
+            ("🖥 Залы и цены", nav(Screen.PRICES), "primary"),
+            ("📋 Мои брони", nav(Screen.BOOKINGS), "primary"),
+        ],
+        [
+            ("❓ FAQ", nav(Screen.FAQ), "primary"),
+            ("📜 Правила", nav(Screen.RULES)),
+        ],
+        [
+            ("📞 Контакты", nav(Screen.CONTACTS), "success"),
+            ("🛡 152-ФЗ", nav(Screen.PRIVACY), "danger"),
+        ],
     ]
     if is_admin:
-        rows.append([("🛠 Админ-панель", nav(Screen.ADMIN))])
+        rows.append([("🛠 Админ-панель", nav(Screen.ADMIN), "primary")])
     return keyboard(*rows)
 
 
 def rules_tabs_keyboard(active_tab: str) -> InlineKeyboardMarkup:
-    """Вкладки раздела «Правила клуба» + переход к бронированию."""
+    """Цветные вкладки раздела «Правила клуба» + переход к бронированию."""
     tabs = [
         ("📌 Основное", texts.RULES_TAB_MAIN),
         ("💳 Оплата", texts.RULES_TAB_PAY),
@@ -326,29 +331,47 @@ def rules_tabs_keyboard(active_tab: str) -> InlineKeyboardMarkup:
         (
             f"• {label}" if key == active_tab else label,
             nav(Screen.RULES, key),
-            "primary" if key == active_tab else "",
+            "success" if key == active_tab else "primary",
         )
         for label, key in tabs
     ]
     return footer_rows(
         tab_row,
-        [(BTN_BOOK_HERO, nav(Screen.BOOK_TARIFF), "primary")],
+        [(BTN_BOOK_HERO, nav(Screen.BOOK_TARIFF), "success")],
     )
 
 
+_FAQ_ITEM_STYLES: Final[dict[str, str]] = {
+    "night": "primary",
+    "packages": "",
+    "prepay": "success",
+    "payment": "success",
+    "pcs": "primary",
+    "faceit": "",
+    "late": "primary",
+    "scam": "danger",
+}
+
+
 def faq_list_keyboard() -> InlineKeyboardMarkup:
-    """Список вопросов: по кнопке на вопрос, ответ открывается в том же сообщении."""
+    """Список вопросов с цветной подсветкой категорий: ответ открывается на месте."""
     return footer_rows(
         *[
-            ((f"{item.emoji} {item.question}", nav(Screen.FAQ_ITEM, item.key)),)
+            (
+                (
+                    f"{item.emoji} {item.question}",
+                    nav(Screen.FAQ_ITEM, item.key),
+                    _FAQ_ITEM_STYLES.get(item.key, ""),
+                ),
+            )
             for item in texts.FAQ_ITEMS
         ]
     )
 
 
 def faq_answer_keyboard() -> InlineKeyboardMarkup:
-    """Экран ответа: возврат к списку вопросов и в меню."""
-    return keyboard([("◀ К списку вопросов", nav(Screen.FAQ))], back_row())
+    """Экран ответа: цветной возврат к списку вопросов и в меню."""
+    return keyboard([("◀ К списку вопросов", nav(Screen.FAQ), "success")], back_row())
 
 
 __all__ = [
@@ -359,11 +382,11 @@ __all__ = [
     "BTN_HOME",
     "BTN_REFRESH",
     "BTN_STEP_BACK",
-    "ButtonSpec",
     "HUD_WIDTH",
     "SCREEN_BACK",
     "SCREEN_ICONS",
     "SCREEN_TITLES",
+    "ButtonSpec",
     "Screen",
     "ScreenCB",
     "back_row",
