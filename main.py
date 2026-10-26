@@ -30,8 +30,8 @@ from aiogram.exceptions import (
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand, BotCommandScopeChat, ErrorEvent
 
-from bot import __version__
-from bot.config import AppConfig, ConfigError, load_config
+from bot import __version__, texts
+from bot.config import AppConfig, ClubInfo, ConfigError, load_config, read_club_info
 from bot.db.cli import create_database
 from bot.db.database import Database, init_database
 from bot.handlers import admin_router, client_router
@@ -60,6 +60,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--init-db",
         action="store_true",
         help="создать базу данных и применить схему, не запуская бота (токен не нужен)",
+    )
+    parser.add_argument(
+        "--print-profile",
+        action="store_true",
+        help="вывести готовые тексты About, Description и путь к картинке 640×360 для @BotFather",
     )
     parser.add_argument(
         "--version",
@@ -96,6 +101,20 @@ async def _setup_bot_commands(bot: Bot, admin_ids: tuple[int, ...]) -> None:
             await bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=admin_id))
         except TelegramAPIError as exc:
             logger.debug("Не удалось сбросить меню команд для %s: %s", admin_id, exc)
+
+
+async def _setup_bot_profile(bot: Bot, club: ClubInfo) -> None:
+    """Синхронизировать поля About и Description профиля бота через Bot API."""
+    about = texts.build_bot_about(club)
+    description = texts.build_bot_description(club)
+    try:
+        await bot.set_my_short_description(short_description=about)
+    except TelegramAPIError as exc:
+        logger.warning("Не удалось обновить About (short_description) бота: %s", exc)
+    try:
+        await bot.set_my_description(description=description)
+    except TelegramAPIError as exc:
+        logger.warning("Не удалось обновить Description бота: %s", exc)
 
 
 async def run_polling(cfg: AppConfig) -> None:
@@ -158,6 +177,7 @@ async def run_polling(cfg: AppConfig) -> None:
             "через .env (CLUB_*, ADMIN_NAME, ADMIN_PHONE, PAYMENT_*)."
         )
         await _setup_bot_commands(bot, admin_ids)
+        await _setup_bot_profile(bot, club)
 
     @dispatcher.shutdown()
     async def on_shutdown() -> None:
@@ -190,6 +210,30 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.version:
         print(f"Telegram-бот кибер-клуба NOVA ARENA (демо), версия {__version__}")
+        return 0
+
+    if args.print_profile:
+        from dotenv import load_dotenv
+
+        from bot.config import BASE_DIR, ENV_FILE
+
+        load_dotenv(dotenv_path=ENV_FILE, override=False)
+        club = read_club_info()
+        about = texts.build_bot_about(club)
+        desc = texts.build_bot_description(club)
+        print(
+            f"=== ABOUT (/setabouttext, {len(about)}/{texts.BOT_ABOUT_LIMIT} симв.) ==="
+        )
+        print(about)
+        print(
+            f"\n=== DESCRIPTION (/setdescription, "
+            f"{len(desc)}/{texts.BOT_DESCRIPTION_LIMIT} симв.) ==="
+        )
+        print(desc)
+        print("\n=== DESCRIPTION PICTURE (/setdescriptionpic, 640×360) ===")
+        print(f"PNG:  {BASE_DIR / 'bot' / 'assets' / 'description_pic.png'}")
+        print(f"JPEG: {BASE_DIR / 'bot' / 'assets' / 'description_pic.jpg'}")
+        print(f"HD:   {BASE_DIR / 'bot' / 'assets' / 'description_pic_hd.png'} (1280×720)")
         return 0
 
     if args.init_db:

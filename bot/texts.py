@@ -1449,6 +1449,53 @@ SCREEN_ADMIN_ADMIN_BODY: str = (
 
 SCREEN_PRIVACY_BODY: str = SCREEN_PRIVACY_CARD_BODY
 
+# ---------------------------------------------------------------------------
+# Профиль бота в Telegram (@BotFather / Bot API: About и Description)
+# ---------------------------------------------------------------------------
+
+#: Жёсткий лимит Telegram на поле About (short_description, /setabouttext).
+BOT_ABOUT_LIMIT: int = 120
+#: Жёсткий лимит Telegram на поле Description (description, /setdescription).
+BOT_DESCRIPTION_LIMIT: int = 512
+
+#: About (видно, когда открывают карточку профиля бота; <= 120 символов):
+#: боль → решение → что делать дальше.
+BOT_ABOUT_TEMPLATE: str = (
+    "Бот для ПК-клубов: убирает бронь из общего чата в личку. "
+    "Потыкайте демо · Под клуб: {bot_contact}"
+)
+
+#: Description (экран до нажатия «Запустить» под картинкой 640×360; <= 512 символов):
+#: боль → решение → интеграции → что делать дальше.
+BOT_DESCRIPTION_TEMPLATE: str = (
+    "Бот для ПК-клубов, который убирает бронь из общего чата.\n"
+    "\n"
+    "Гость выбирает время и количество в личке, получает реквизиты, скидывает "
+    "чек туда же. Вам приходит карточка: «2 чел., 20:00–23:00, чек» + кнопка "
+    "«Подтвердить». В общем чате чисто, имена и чеки не видят другие клиенты.\n"
+    "\n"
+    "Работает с Google Sheets, IZI и ручным учётом.\n"
+    "\n"
+    "Это прототип. Потыкайте кнопки, посмотрите, как выглядит. "
+    "Если полезно — напишите {bot_contact}, обсудим под ваш клуб."
+)
+
+
+def build_bot_about(club: ClubInfo) -> str:
+    """Собрать поле About (``short_description``, до 120 символов)."""
+    text = render(BOT_ABOUT_TEMPLATE, club).strip()
+    if len(text) <= BOT_ABOUT_LIMIT:
+        return text
+    return text[: BOT_ABOUT_LIMIT - 1].rstrip() + "…"
+
+
+def build_bot_description(club: ClubInfo) -> str:
+    """Собрать поле Description (``description``, до 512 символов)."""
+    text = render(BOT_DESCRIPTION_TEMPLATE, club).strip()
+    if len(text) <= BOT_DESCRIPTION_LIMIT:
+        return text
+    return text[: BOT_DESCRIPTION_LIMIT - 1].rstrip() + "…"
+
 
 def tariff_titles() -> Iterable[str]:
     """Названия всех тарифов — для справок и логов."""
@@ -1502,6 +1549,10 @@ __all__ = [
     "BOOKING_SESSION_LOST",
     "BOOKING_SESSION_OUTDATED",
     "BOOKING_SPOT_RECEIVED",
+    "BOT_ABOUT_LIMIT",
+    "BOT_ABOUT_TEMPLATE",
+    "BOT_DESCRIPTION_LIMIT",
+    "BOT_DESCRIPTION_TEMPLATE",
     "CHOOSE_TARIFF",
     "CHOOSE_TIME",
     "CLIENT_APPROVED",
@@ -1599,6 +1650,8 @@ __all__ = [
     "amount_due",
     "amount_for_booking",
     "amount_text",
+    "build_bot_about",
+    "build_bot_description",
     "build_contacts_body",
     "build_contacts_text",
     "build_faq_text",

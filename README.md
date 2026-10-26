@@ -10,9 +10,10 @@
 без связи с каким-либо реальным клубом. Любое поле меняется через `.env` без
 правки кода (см. [«Данные клуба»](#данные-клуба-цены-адрес-администратор)).
 
-Для самого Telegram-бота подготовлен отдельный фирменный логотип высокого разрешения:
-[`bot/assets/nova_arena_bot_logo.png`](bot/assets/nova_arena_bot_logo.png) (`2048×2048`)
-и готовая версия для `@BotFather` (`/setuserpic`): [`bot/assets/avatar.jpg`](bot/assets/avatar.jpg) (`640×640`).
+Для самого Telegram-бота подготовлен полный комплект оформления профиля (`@BotFather`):
+- **Аватар бота:** [`bot/assets/nova_arena_bot_logo.png`](bot/assets/nova_arena_bot_logo.png) (`2048×2048`) и [`bot/assets/avatar.jpg`](bot/assets/avatar.jpg) (`640×640` для `/setuserpic`);
+- **Description Picture (`640×360`):** [`bot/assets/description_pic.png`](bot/assets/description_pic.png) и [`bot/assets/description_pic.jpg`](bot/assets/description_pic.jpg) (ровно `640×360` пикселей для `/setdescriptionpic`, плюс HD-версия [`bot/assets/description_pic_hd.png`](bot/assets/description_pic_hd.png) `1280×720`);
+- **About (`≤ 120` симв.) и Description (`≤ 512` симв.):** автоматически прописываются в профиль бота при запуске `python main.py` через Bot API (контакт настраивается переменной `BOT_CONTACT=@ваш_ник` в `.env`, а вывести готовые тексты можно командой `python main.py --print-profile`).
 
 **Стек:** Python 3.10+, [aiogram 3.x](https://docs.aiogram.dev/) (Router, F, FSMContext, StatesGroup, `InputMediaPhoto`, `CopyTextButton`, `style`),
 [Pillow](https://python-pillow.org/) (генерация HD-карточек 1280×720), SQLite через [aiosqlite](https://aiosqlite.readthedocs.io/), [python-dotenv](https://saurabh-kumar.com/python-dotenv/).
@@ -124,12 +125,13 @@ python main.py
 
 Полезные флаги запуска:
 
-| Команда                   | Что делает                                                    |
-| ------------------------- | ------------------------------------------------------------- |
-| `python main.py`          | запуск бота (long polling)                                     |
-| `python main.py --init-db`| создать базу и применить схему, не запуская бота (токен не нужен) |
-| `python main.py --version`| показать версию                                                |
-| `python main.py --help`   | справка по флагам                                              |
+| Команда                        | Что делает                                                    |
+| ------------------------------ | ------------------------------------------------------------- |
+| `python main.py`               | запуск бота (long polling + автосинхронизация About/Description) |
+| `python main.py --init-db`     | создать базу и применить схему, не запуская бота (токен не нужен) |
+| `python main.py --print-profile` | вывести готовые тексты About, Description и пути к картинке 640×360 |
+| `python main.py --version`     | показать версию                                                |
+| `python main.py --help`        | справка по флагам                                              |
 
 ---
 
@@ -158,6 +160,29 @@ python main.py
    первым. Бот напомнит об этом в панели при добавлении.
 6. Старый вариант `ADMIN_ID=123456789` (один администратор) тоже понимается —
    `ADMIN_IDS` имеет приоритет.
+
+---
+
+## Оформление профиля бота (`@BotFather`)
+
+Для витрины бота подготовлены все три элемента профиля:
+
+1. **About** (`/setabouttext`, до `120` символов) — короткая строка в карточке профиля.
+2. **Description** (`/setdescription`, до `512` символов) — экран «Что умеет этот бот?» до нажатия «Запустить» по структуре **боль → решение → что делать дальше**.
+3. **Description Picture** (`/setdescriptionpic`, ровно **`640×360`** px) — баннер над текстом описания:
+   - [`bot/assets/description_pic.png`](bot/assets/description_pic.png) (`640×360` PNG);
+   - [`bot/assets/description_pic.jpg`](bot/assets/description_pic.jpg) (`640×360` JPEG);
+   - [`bot/assets/description_pic_hd.png`](bot/assets/description_pic_hd.png) (`1280×720` HD-исходник).
+
+Тексты **About** и **Description** бот **сам прописывает при запуске** `python main.py` через Bot API (`setMyShortDescription` и `setMyDescription`), подставляя ваш контакт из `.env` (`BOT_CONTACT=@ваш_ник`). Вывести готовые тексты для ручного копирования можно командой:
+
+```bash
+python main.py --print-profile
+```
+
+Картинку описания (`Description Picture`) и аватар Telegram Bot API загружать программно не позволяет — они ставятся один раз в [@BotFather](https://t.me/BotFather):
+- `/setuserpic` → выберите бота → отправьте `bot/assets/avatar.jpg` (`640×640`) или `bot/assets/nova_arena_bot_logo.png`;
+- `/setdescriptionpic` → выберите бота → отправьте **как фото (не файлом)** `bot/assets/description_pic.png` (`640×360`).
 
 ---
 
@@ -548,10 +573,13 @@ Admiral-club/
 │   │   └── cli.py             # python -m bot.db.cli — создание базы
 │   ├── assets/
 │   │   ├── nova_arena_bot_logo.png  # отдельный логотип самого бота (2048×2048)
-│   │   ├── avatar.jpg         # аватар бота 640×640 (готов для @BotFather /setuserpic)
-│   │   ├── logo.png           # гексагональная эмблема сверхновой для карточек (RGBA)
-│   │   ├── backgrounds/       # абстрактные неоновые фоны #FF6224 → #24F0A8 (1280×720)
-│   │   └── fonts/             # кириллические шрифты Unbounded, Manrope, JetBrains Mono (OFL)
+│   │   ├── avatar.jpg               # аватар бота 640×640 (для @BotFather /setuserpic)
+│   │   ├── description_pic.png      # Description Picture 640×360 (для @BotFather /setdescriptionpic)
+│   │   ├── description_pic.jpg      # лёгкая JPEG-версия 640×360 для /setdescriptionpic
+│   │   ├── description_pic_hd.png   # HD-версия баннера описания 1280×720
+│   │   ├── logo.png                 # гексагональная эмблема сверхновой для карточек (RGBA)
+│   │   ├── backgrounds/             # абстрактные неоновые фоны #FF6224 → #24F0A8 (1280×720)
+│   │   └── fonts/                   # кириллические шрифты Unbounded, Manrope, JetBrains Mono (OFL)
 │   ├── ui/
 │   │   ├── cards.py           # генератор HD-карточек (Pillow 1280×720) + кэш file_id
 │   │   ├── screens.py         # идентификаторы экранов, вкладки, цветные кнопки, CopyTextButton
@@ -658,7 +686,7 @@ python tests/smoke_test.py
 
 ```
 ================================================================
-Проверок выполнено: 625, успешно: 625, ошибок: 0
+Проверок выполнено: 632, успешно: 632, ошибок: 0
 Все проверки пройдены ✅
 ================================================================
 ```

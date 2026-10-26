@@ -49,6 +49,8 @@ DEFAULT_ADMIN_PHONE: str = "+7 (900) 000-42-42"
 DEFAULT_PAYMENT_SYSTEM: str = "Демо-Банк (СБП)"
 DEFAULT_PAYMENT_CARD: str = "+7 (900) 000-77-88"
 DEFAULT_PAYMENT_HOLDER: str = "Алексей Н. (демо)"
+#: Контакт автора/разработчика в полях About и Description профиля бота.
+DEFAULT_BOT_CONTACT: str = "@ваш_ник"
 
 
 class ConfigError(RuntimeError):
@@ -82,6 +84,7 @@ class ClubInfo:
     payment_system: str = DEFAULT_PAYMENT_SYSTEM
     payment_card: str = DEFAULT_PAYMENT_CARD
     payment_holder: str = DEFAULT_PAYMENT_HOLDER
+    bot_contact: str = DEFAULT_BOT_CONTACT
 
     @property
     def admin_phone_raw(self) -> str:
@@ -110,6 +113,7 @@ class ClubInfo:
             "payment_system": self.payment_system,
             "payment_card": self.payment_card,
             "payment_holder": self.payment_holder,
+            "bot_contact": self.bot_contact,
         }
 
 
@@ -241,6 +245,9 @@ def _read_optional(env_key: str, default: str) -> str:
 
 def read_club_info() -> ClubInfo:
     """Собрать сведения о клубе из ``.env`` (или взять значения по умолчанию)."""
+    contact = _read_optional("BOT_CONTACT", DEFAULT_BOT_CONTACT)
+    if contact and not contact.startswith(("@", "http://", "https://", "t.me/")):
+        contact = f"@{contact}"
     return ClubInfo(
         name=_read_optional("CLUB_NAME", DEFAULT_CLUB_NAME),
         city=_read_optional("CLUB_CITY", DEFAULT_CLUB_CITY),
@@ -251,6 +258,7 @@ def read_club_info() -> ClubInfo:
         payment_system=_read_optional("PAYMENT_SYSTEM", DEFAULT_PAYMENT_SYSTEM),
         payment_card=_read_optional("PAYMENT_CARD", DEFAULT_PAYMENT_CARD),
         payment_holder=_read_optional("PAYMENT_HOLDER", DEFAULT_PAYMENT_HOLDER),
+        bot_contact=contact,
     )
 
 
