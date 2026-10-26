@@ -791,8 +791,8 @@ def test_keyboards() -> None:
         ScreenCB.unpack(faq_buttons[0].callback_data).screen == Screen.FAQ_ITEM,
     )
     check(
-        "Под FAQ есть «◀ Назад» и «🏠 В меню»",
-        [b.text for b in faq_kb.inline_keyboard[-1]] == ["◀ Назад", "🏠 В меню"],
+        "Под FAQ есть «⬅️ Назад» и «🏠 В меню»",
+        [b.text for b in faq_kb.inline_keyboard[-1]] == ["⬅️ Назад", "🏠 В меню"],
     )
 
     legacy_menu = reply_keyboards.main_menu()
@@ -1862,14 +1862,14 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
     check("Статистика содержит «Отклонено»", "Отклонено" in stats_text)
     check("Статистика показывает число клиентов", "Клиентов" in stats_text)
     check(
-        "Панель содержит кнопку «📋 Активные брони» и «◀ Назад»",
+        "Панель содержит кнопку «📋 Активные брони» и «⬅️ Назад»",
         any(
             b.text.startswith("📋 Активные брони")
             for row in markup_of(stats_payload).inline_keyboard
             for b in row
         )
         and any(
-            b.text == "◀ Назад"
+            b.text == "⬅️ Назад"
             for row in markup_of(stats_payload).inline_keyboard
             for b in row
         ),
@@ -2076,9 +2076,9 @@ async def test_cancel_and_outdated(db: Database, cfg: AppConfig) -> None:
         b for row in markup_of(privacy_payload).inline_keyboard for b in row
     ]
     check(
-        "В /privacy есть кнопка отзыва согласия и «◀ Назад»",
+        "В /privacy есть кнопка отзыва согласия и «⬅️ Назад»",
         any(b.callback_data == inline_keyboards.CB_CONSENT_REVOKE for b in privacy_btns)
-        and any(b.text == "◀ Назад" for b in privacy_btns),
+        and any(b.text == "⬅️ Назад" for b in privacy_btns),
     )
 
     # --- отзыв согласия: бот перестаёт работать ----------------------------- #
@@ -4067,6 +4067,7 @@ async def test_graphical_cards(db: Database, cfg: AppConfig) -> None:
         TONE_ORDER,
         TONES,
         audit_keyboard_harmony,
+        button_has_emoji,
         reset_custom_emoji_state,
         set_custom_emoji_ids,
     )
@@ -4181,6 +4182,16 @@ async def test_graphical_cards(db: Database, cfg: AppConfig) -> None:
             "При активном custom_emoji-паке меню использует >= 6 оттенков 10-тоновой палитры",
             len(used_eids) >= 6,
             f"used={len(used_eids)}",
+        )
+        check(
+            "Стандартные эмодзи НИКОГДА не вырезаются из текста кнопок даже при custom_emoji",
+            all(
+                button_has_emoji(b.text)
+                for row in rich_menu.reply_markup.inline_keyboard
+                for b in row
+            )
+            and rich_menu.reply_markup.inline_keyboard[0][0].text
+            == "🎮 Забронировать место",
         )
 
         class NoPremiumEmojiBot(BotSpy):

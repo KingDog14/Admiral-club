@@ -954,9 +954,9 @@ async def _render_admin_pending(ctx: ViewContext, arg: str) -> ScreenView:
     if pages > 1:
         rows.append(
             [
-                ("◀", nav(Screen.ADMIN_PENDING, max(0, page - 1)), Surface.GLASS, Tone.SLATE),
-                (f"{page + 1}/{pages}", nav(Screen.ADMIN_PENDING, page), Surface.GLASS, Tone.SLATE),
-                ("▶", nav(Screen.ADMIN_PENDING, min(pages - 1, page + 1)), Surface.GLASS, Tone.SLATE),
+                ("⬅️", nav(Screen.ADMIN_PENDING, max(0, page - 1)), Surface.GLASS, Tone.SLATE),
+                (f"📄 {page + 1}/{pages}", nav(Screen.ADMIN_PENDING, page), Surface.GLASS, Tone.SLATE),
+                ("➡️", nav(Screen.ADMIN_PENDING, min(pages - 1, page + 1)), Surface.GLASS, Tone.SLATE),
             ]
         )
     rows.append([(BTN_REFRESH, nav(Screen.ADMIN_PENDING, page), Surface.GLASS, Tone.SLATE)])
@@ -1121,7 +1121,7 @@ async def _render_admin_card(ctx: ViewContext, arg: str) -> ScreenView:
     )
     rows.append(
         [
-            ("◀ К списку", nav(Screen.ADMIN_ADMINS), Surface.GLASS, Tone.SLATE),
+            ("👥 К списку", nav(Screen.ADMIN_ADMINS), Surface.GLASS, Tone.SLATE),
             (BTN_HOME, nav(Screen.MENU), Surface.GLASS, Tone.SLATE),
         ]
     )
