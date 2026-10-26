@@ -4189,6 +4189,48 @@ async def test_graphical_cards(db: Database, cfg: AppConfig) -> None:
                 bg_img.size == (1280, 720),
             )
 
+    # Проверка About, Description и Description Picture (640×360 для @BotFather)
+    about_default = texts.build_bot_about(ClubInfo())
+    desc_default = texts.build_bot_description(ClubInfo())
+    long_contact_club = ClubInfo(bot_contact="@" + "x" * 32)
+    about_long = texts.build_bot_about(long_contact_club)
+    desc_long = texts.build_bot_description(long_contact_club)
+    check(
+        "About бота укладывается в 120 символов и содержит контакт",
+        0 < len(about_default) <= texts.BOT_ABOUT_LIMIT
+        and len(about_long) <= texts.BOT_ABOUT_LIMIT
+        and "@ваш_ник" in about_default
+        and "{" not in about_default,
+        f"len={len(about_default)}, long_len={len(about_long)}",
+    )
+    check(
+        "Description бота укладывается в 512 символов и содержит все тезисы",
+        0 < len(desc_default) <= texts.BOT_DESCRIPTION_LIMIT
+        and len(desc_long) <= texts.BOT_DESCRIPTION_LIMIT
+        and all(
+            phrase in desc_default
+            for phrase in (
+                "убирает бронь из общего чата",
+                "Google Sheets, IZI",
+                "@ваш_ник",
+                "Подтвердить",
+            )
+        )
+        and "{" not in desc_default,
+        f"len={len(desc_default)}, long_len={len(desc_long)}",
+    )
+    for pic_name in ("description_pic.png", "description_pic.jpg"):
+        pic_file = ASSETS_DIR / pic_name
+        check(f"Description Picture {pic_name} существует", pic_file.is_file())
+        with Image.open(pic_file) as pic_img:
+            check(
+                f"Description Picture {pic_name} ровно 640×360 для @BotFather",
+                pic_img.size == (640, 360),
+            )
+    hd_pic_file = ASSETS_DIR / "description_pic_hd.png"
+    with Image.open(hd_pic_file) as hd_img:
+        check("HD-версия Description Picture имеет размер 1280×720", hd_img.size == (1280, 720))
+
     await state.storage.close()
 
 
