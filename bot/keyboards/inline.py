@@ -32,7 +32,8 @@ from __future__ import annotations
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.db.models import Admin, AdminRole, Booking, BookingStatus
-from bot.texts import TARIFFS, TIME_CHOICES, tariff_button_label
+from bot.palette import TARIFF_TONES, TIME_TONES, Surface, Tone, apply_tone_icon
+from bot.texts import TARIFFS, TIME_CHOICES, TIME_NOW_KEY, tariff_button_label
 
 # --- идентификаторы callback_data -------------------------------------------
 
@@ -229,24 +230,41 @@ def parse_admin_list_page(data: str | None) -> int | None:
 
 # --- клавиатуры -------------------------------------------------------------
 
-
 _SUPPORTS_STYLE: bool = "style" in InlineKeyboardButton.model_fields
+_SUPPORTS_CUSTOM_EMOJI: bool = (
+    "icon_custom_emoji_id" in InlineKeyboardButton.model_fields
+)
 
 
 def _btn(
-    text: str, callback_data: str, *, style: str | None = None
+    text: str,
+    callback_data: str,
+    *,
+    style: str | None = None,
+    tone: str | None = None,
 ) -> InlineKeyboardButton:
-    """Собрать кнопку с нативным цветовым акцентом Bot API (если поддерживается)."""
+    """Собрать кнопку с 10-тоновой палитрой и поверхностью Bot API."""
+    rendered_text, custom_emoji_id = apply_tone_icon(text, tone)
+    kwargs: dict[str, object] = {"text": rendered_text, "callback_data": callback_data}
     if style and _SUPPORTS_STYLE:
-        return InlineKeyboardButton(text=text, callback_data=callback_data, style=style)
-    return InlineKeyboardButton(text=text, callback_data=callback_data)
+        kwargs["style"] = style
+    if custom_emoji_id and _SUPPORTS_CUSTOM_EMOJI:
+        kwargs["icon_custom_emoji_id"] = custom_emoji_id
+    return InlineKeyboardButton(**kwargs)  # type: ignore[arg-type]
 
 
 def consent_keyboard() -> InlineKeyboardMarkup:
     """Экран согласия на обработку персональных данных (152-ФЗ)."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [_btn("✅ Я согласен", CB_CONSENT_GIVE, style="success")],
+            [
+                _btn(
+                    "✅ Я согласен",
+                    CB_CONSENT_GIVE,
+                    style=Surface.HERO,
+                    tone=Tone.MINT,
+                )
+            ],
         ]
     )
 
@@ -255,7 +273,14 @@ def privacy_keyboard() -> InlineKeyboardMarkup:
     """Раздел /privacy: кнопка отзыва согласия на обработку ПДн."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [_btn("🚫 Отозвать согласие", CB_CONSENT_REVOKE, style="danger")],
+            [
+                _btn(
+                    "🚫 Отозвать согласие",
+                    CB_CONSENT_REVOKE,
+                    style=Surface.DANGER,
+                    tone=Tone.RUBY,
+                )
+            ],
         ]
     )
 
@@ -265,8 +290,18 @@ def revoke_confirm_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                _btn("✅ Да, отозвать", CB_CONSENT_REVOKE_YES, style="danger"),
-                _btn("↩️ Отмена", CB_CONSENT_REVOKE_NO, style="success"),
+                _btn(
+                    "✅ Да, отозвать",
+                    CB_CONSENT_REVOKE_YES,
+                    style=Surface.DANGER,
+                    tone=Tone.RUBY,
+                ),
+                _btn(
+                    "↩️ Отмена",
+                    CB_CONSENT_REVOKE_NO,
+                    style=Surface.ACCENT,
+                    tone=Tone.SAPPHIRE,
+                ),
             ],
         ]
     )
@@ -275,16 +310,34 @@ def revoke_confirm_keyboard() -> InlineKeyboardMarkup:
 def payment_choice_keyboard(prepayment_required: bool) -> InlineKeyboardMarkup:
     """Шаг 4: как оплатить — прислать чек или заплатить на месте."""
     rows: list[list[InlineKeyboardButton]] = [
-        [_btn("📸 Оплатил — отправить чек", CB_PAY_CHECK, style="success")],
+        [
+            _btn(
+                "📸 Оплатил — отправить чек",
+                CB_PAY_CHECK,
+                style=Surface.HERO,
+                tone=Tone.MINT,
+            )
+        ],
     ]
     if not prepayment_required:
-        rows.append([_btn("💵 Оплачу на месте", CB_PAY_SPOT, style="primary")])
+        rows.append(
+            [
+                _btn(
+                    "💵 Оплачу на месте",
+                    CB_PAY_SPOT,
+                    style=Surface.GLASS,
+                    tone=Tone.JADE,
+                )
+            ]
+        )
     rows.append([_cancel_button()])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _cancel_button() -> InlineKeyboardButton:
-    return _btn(CANCEL_BUTTON_TEXT, CB_BOOKING_CANCEL, style="danger")
+    return _btn(
+        CANCEL_BUTTON_TEXT, CB_BOOKING_CANCEL, style=Surface.DANGER, tone=Tone.RUBY
+    )
 
 
 def booking_cancel_keyboard() -> InlineKeyboardMarkup:
@@ -292,30 +345,15 @@ def booking_cancel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[_cancel_button()]])
 
 
-_TARIFF_STYLES: dict[str, str] = {
-    "standart": "success",
-    "vip": "primary",
-    "svip": "danger",
-    "double": "primary",
-}
-
-_TIME_STYLES: dict[str, str] = {
-    "now": "success",
-    "morning": "primary",
-    "day": "primary",
-    "night": "success",
-    "other": "primary",
-}
-
-
 def tariffs_keyboard() -> InlineKeyboardMarkup:
-    """Шаг 1 бронирования: Standart, VIP, S VIP, Double."""
+    """Шаг 1 бронирования: 4 зала на матовом стекле с индивидуальными тонами + отмена."""
     rows: list[list[InlineKeyboardButton]] = [
         [
             _btn(
                 tariff_button_label(tariff),
                 tariff_callback(tariff.key),
-                style=_TARIFF_STYLES.get(tariff.key, "primary"),
+                style=Surface.GLASS,
+                tone=TARIFF_TONES.get(tariff.key, Tone.MINT),
             )
         ]
         for tariff in TARIFFS
@@ -325,9 +363,16 @@ def tariffs_keyboard() -> InlineKeyboardMarkup:
 
 
 def time_slots_keyboard() -> InlineKeyboardMarkup:
-    """Шаг 2 бронирования: «Сейчас», «На ночь», «Другое»."""
+    """Шаг 2 бронирования: акцент на «Сейчас», спокойное стекло для пакетов + отмена."""
     rows: list[list[InlineKeyboardButton]] = [
-        [_btn(label, time_callback(key), style=_TIME_STYLES.get(key, "primary"))]
+        [
+            _btn(
+                label,
+                time_callback(key),
+                style=Surface.HERO if key == TIME_NOW_KEY else Surface.GLASS,
+                tone=TIME_TONES.get(key, Tone.SAPPHIRE),
+            )
+        ]
         for key, label in TIME_CHOICES
     ]
     rows.append([_cancel_button()])
@@ -342,9 +387,15 @@ def booking_decision_keyboard(booking_id: int) -> InlineKeyboardMarkup:
                 _btn(
                     "✅ Подтвердить",
                     admin_approve_callback(booking_id),
-                    style="success",
+                    style=Surface.HERO,
+                    tone=Tone.MINT,
                 ),
-                _btn("❌ Отклонить", admin_reject_callback(booking_id), style="danger"),
+                _btn(
+                    "❌ Отклонить",
+                    admin_reject_callback(booking_id),
+                    style=Surface.DANGER,
+                    tone=Tone.RUBY,
+                ),
             ]
         ]
     )
@@ -354,9 +405,30 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
     """Панель под сообщением со статистикой (/admin)."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [_btn("📋 Активные брони", admin_list_callback(0), style="success")],
-            [_btn("👥 Администраторы", CB_ADMIN_ADMINS, style="primary")],
-            [_btn("🔄 Обновить статистику", CB_ADMIN_STATS, style="primary")],
+            [
+                _btn(
+                    "📋 Активные брони",
+                    admin_list_callback(0),
+                    style=Surface.HERO,
+                    tone=Tone.MINT,
+                )
+            ],
+            [
+                _btn(
+                    "👥 Администраторы",
+                    CB_ADMIN_ADMINS,
+                    style=Surface.GLASS,
+                    tone=Tone.AMETHYST,
+                )
+            ],
+            [
+                _btn(
+                    "🔄 Обновить статистику",
+                    CB_ADMIN_STATS,
+                    style=Surface.GLASS,
+                    tone=Tone.SLATE,
+                )
+            ],
         ]
     )
 
@@ -364,7 +436,16 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
 def admin_add_cancel_keyboard() -> InlineKeyboardMarkup:
     """Клавиатура под запросом ID нового администратора."""
     return InlineKeyboardMarkup(
-        inline_keyboard=[[_btn("❌ Отменить", CB_ADMIN_ADD_CANCEL, style="danger")]]
+        inline_keyboard=[
+            [
+                _btn(
+                    "❌ Отменить",
+                    CB_ADMIN_ADD_CANCEL,
+                    style=Surface.DANGER,
+                    tone=Tone.RUBY,
+                )
+            ]
+        ]
     )
 
 
@@ -372,11 +453,11 @@ def admins_nav_keyboard() -> InlineKeyboardMarkup:
     """Навигация под пустым/служебным сообщением раздела администраторов."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [_btn("➕ Добавить", CB_ADMIN_ADD, style=Surface.HERO, tone=Tone.MINT)],
             [
-                _btn("➕ Добавить", CB_ADMIN_ADD, style="success"),
-                _btn("🔄 Обновить", CB_ADMIN_ADMINS, style="primary"),
+                _btn("🔄 Обновить", CB_ADMIN_ADMINS, style=Surface.GLASS, tone=Tone.SLATE),
+                _btn("📊 Статистика", CB_ADMIN_STATS, style=Surface.GLASS, tone=Tone.SAPPHIRE),
             ],
-            [_btn("📊 Статистика", CB_ADMIN_STATS, style="primary")],
         ]
     )
 
@@ -387,15 +468,19 @@ def admins_list_keyboard(
     env_owner_id: int,
     viewer_is_owner: bool,
 ) -> InlineKeyboardMarkup:
-    """Кнопки управления администраторами.
-
-    * владельцу доступны включение/отключение, смена роли и удаление;
-    * владелец из ``.env`` защищён — под ним кнопок нет;
-    * обычному администратору показываем только навигацию (управление запрещено).
-    """
+    """Кнопки управления администраторами без визуального шума."""
     if not viewer_is_owner:
         return InlineKeyboardMarkup(
-            inline_keyboard=[[_btn("📊 Статистика", CB_ADMIN_STATS, style="primary")]]
+            inline_keyboard=[
+                [
+                    _btn(
+                        "📊 Статистика",
+                        CB_ADMIN_STATS,
+                        style=Surface.GLASS,
+                        tone=Tone.SAPPHIRE,
+                    )
+                ]
+            ]
         )
 
     rows: list[list[InlineKeyboardButton]] = []
@@ -407,26 +492,33 @@ def admins_list_keyboard(
                 _btn(
                     "✅ Включить" if not admin.is_active else "⛔️ Отключить",
                     admin_toggle_callback(admin.user_id),
-                    style="success" if not admin.is_active else "danger",
+                    style=Surface.GLASS,
+                    tone=Tone.MINT if not admin.is_active else Tone.AMBER,
                 ),
                 _btn(
                     "👤 Оператор" if admin.is_owner else "👑 Владелец",
                     admin_demote_callback(admin.user_id)
                     if admin.is_owner
                     else admin_promote_callback(admin.user_id),
-                    style="primary",
+                    style=Surface.GLASS,
+                    tone=Tone.SAPPHIRE if admin.is_owner else Tone.AMBER,
                 ),
-                _btn("🗑 Удалить", admin_delete_callback(admin.user_id), style="danger"),
+                _btn(
+                    "🗑 Удалить",
+                    admin_delete_callback(admin.user_id),
+                    style=Surface.DANGER,
+                    tone=Tone.RUBY,
+                ),
             ]
         )
 
+    rows.append([_btn("➕ Добавить", CB_ADMIN_ADD, style=Surface.HERO, tone=Tone.MINT)])
     rows.append(
         [
-            _btn("➕ Добавить", CB_ADMIN_ADD, style="success"),
-            _btn("🔄 Обновить", CB_ADMIN_ADMINS, style="primary"),
+            _btn("🔄 Обновить", CB_ADMIN_ADMINS, style=Surface.GLASS, tone=Tone.SLATE),
+            _btn("📊 Статистика", CB_ADMIN_STATS, style=Surface.GLASS, tone=Tone.SAPPHIRE),
         ]
     )
-    rows.append([_btn("📊 Статистика", CB_ADMIN_STATS, style="primary")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -435,14 +527,20 @@ def pending_list_keyboard(
     page: int,
     pages: int,
 ) -> InlineKeyboardMarkup:
-    """Кнопки решения по каждой заявке + навигация по страницам списка."""
+    """Кнопки решения по каждой заявке + спокойная навигация по страницам списка."""
     rows: list[list[InlineKeyboardButton]] = [
         [
             _btn(
-                f"✅ №{booking.id}", admin_approve_callback(booking.id), style="success"
+                f"✅ №{booking.id}",
+                admin_approve_callback(booking.id),
+                style=Surface.HERO,
+                tone=Tone.MINT,
             ),
             _btn(
-                f"❌ №{booking.id}", admin_reject_callback(booking.id), style="danger"
+                f"❌ №{booking.id}",
+                admin_reject_callback(booking.id),
+                style=Surface.DANGER,
+                tone=Tone.RUBY,
             ),
         ]
         for booking in bookings
@@ -452,13 +550,25 @@ def pending_list_keyboard(
     if pages > 1:
         if page > 0:
             navigation.append(
-                _btn("⬅️ Назад", admin_list_callback(page - 1), style="primary")
+                _btn(
+                    "⬅️ Назад",
+                    admin_list_callback(page - 1),
+                    style=Surface.GLASS,
+                    tone=Tone.SLATE,
+                )
             )
         if page < pages - 1:
             navigation.append(
-                _btn("➡️ Вперёд", admin_list_callback(page + 1), style="primary")
+                _btn(
+                    "➡️ Вперёд",
+                    admin_list_callback(page + 1),
+                    style=Surface.GLASS,
+                    tone=Tone.SLATE,
+                )
             )
-    navigation.append(_btn("📊 Статистика", CB_ADMIN_STATS, style="primary"))
+    navigation.append(
+        _btn("📊 Статистика", CB_ADMIN_STATS, style=Surface.GLASS, tone=Tone.SAPPHIRE)
+    )
     rows.append(navigation)
 
     return InlineKeyboardMarkup(inline_keyboard=rows)

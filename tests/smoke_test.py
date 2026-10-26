@@ -4063,6 +4063,15 @@ async def test_graphical_cards(db: Database, cfg: AppConfig) -> None:
         (Screen.ADMIN_ADD, ""),
     ]
 
+    from bot.ui.palette import (
+        TONE_ORDER,
+        TONES,
+        audit_keyboard_harmony,
+        reset_custom_emoji_state,
+        set_custom_emoji_ids,
+    )
+    from bot.utils.telegram import send_photo_screen
+
     for scr, arg in screens_to_check:
         label = f"{scr}:{arg}" if arg else scr
         view = await render_screen(ctx, scr, arg)
@@ -4071,10 +4080,19 @@ async def test_graphical_cards(db: Database, cfg: AppConfig) -> None:
         vis_len = visible_length(view.caption)
         no_pre = "<pre>" not in view.caption and "</pre>" not in view.caption
         no_meta = "он откроется здесь же" not in view.caption
+        harmony = audit_keyboard_harmony(
+            view.reply_markup,
+            allow_batch_decisions=(scr == Screen.ADMIN_PENDING),
+        )
         check(
             f"Экран [{label}]: JPEG 1280×720, без <pre>, подпись {vis_len} ≤ {CAPTION_LIMIT}",
             size_ok and no_pre and no_meta and 0 < vis_len <= CAPTION_LIMIT,
             f"size_ok={size_ok}, no_pre={no_pre}, vis_len={vis_len}",
+        )
+        check(
+            f"Гармония inline-палитры [{label}] (60–30–10, без «гирлянды»)",
+            harmony.ok,
+            "; ".join(harmony.issues),
         )
 
     # Проверка безопасной обрезки HTML с закрытием тегов
@@ -4091,30 +4109,35 @@ async def test_graphical_cards(db: Database, cfg: AppConfig) -> None:
         and cut.count("<blockquote>") == cut.count("</blockquote>"),
     )
 
-    # Проверка многоцветных inline-кнопок Bot API и CopyTextButton
+    # Проверка 10-тоновой inline-палитры, правила 60–30–10 и CopyTextButton
     menu_view = await render_screen(ctx, Screen.MENU, "")
     hero_btn = menu_view.reply_markup.inline_keyboard[0][0]
     check_equal("Главная CTA-кнопка меню окрашена в success", hero_btn.style, "success")
-    menu_styles = {
-        b.style
+    menu_danger = [
+        b.text
         for row in menu_view.reply_markup.inline_keyboard
         for b in row
-        if getattr(b, "style", None)
-    }
+        if getattr(b, "style", None) == "danger"
+    ]
     check(
-        "Главное меню содержит все три цвета Bot API (success, primary, danger)",
-        {"success", "primary", "danger"}.issubset(menu_styles),
-        f"menu_styles={menu_styles}",
+        "В главном меню нет ложных красных кнопок danger (не «гирлянда»)",
+        not menu_danger,
+        f"menu_danger={menu_danger}",
     )
 
     tariff_view = await render_screen(ctx, Screen.BOOK_TARIFF, "")
-    tariff_styles = [
-        b.style
-        for row in tariff_view.reply_markup.inline_keyboard
+    tariff_btns = [
+        b
+        for row in tariff_view.reply_markup.inline_keyboard[:2]
         for b in row
-        if getattr(b, "style", None)
     ]
-    check("Кнопки выбора зала раскрашены акцентами Bot API", len(tariff_styles) >= 5)
+    tariff_badges = {b.text.split()[0] for b in tariff_btns}
+    check(
+        "Четыре зала стоят на матовом стекле с 4 разными цветовыми маркерами (🟢/🟡/🟠/💎)",
+        len(tariff_badges) == 4
+        and all(getattr(b, "style", None) is None for b in tariff_btns),
+        f"badges={tariff_badges}",
+    )
 
     contacts_view = await render_screen(ctx, Screen.CONTACTS, "")
     copy_btns = [
@@ -4124,10 +4147,77 @@ async def test_graphical_cards(db: Database, cfg: AppConfig) -> None:
         if getattr(b, "copy_text", None) is not None
     ]
     check(
-        "На экране контактов есть цветные кнопки копирования реквизитов и телефона",
+        "На экране контактов есть симметричная пара кнопок копирования реквизитов и телефона",
         len(copy_btns) == 2
-        and all(getattr(b, "style", None) in ("success", "primary") for b in copy_btns),
+        and all(getattr(b, "style", None) == "primary" for b in copy_btns),
     )
+
+    # Проверка 10 векторных 100×100 RGBA иконок палитры и авто-отката без Premium
+    for tone_key in TONE_ORDER:
+        spec = TONES[tone_key]
+        check(
+            f"Иконка тона {tone_key} ({spec.hex_color}) существует",
+            spec.icon_path.is_file(),
+        )
+        with Image.open(spec.icon_path) as t_img:
+            check(
+                f"Иконка тона {tone_key} — 100×100 RGBA с прозрачным углом",
+                t_img.size == (100, 100)
+                and t_img.mode == "RGBA"
+                and t_img.getpixel((0, 0))[3] == 0,
+            )
+
+    demo_eids = {k: str(5900000000000000000 + i) for i, k in enumerate(TONE_ORDER)}
+    try:
+        set_custom_emoji_ids(demo_eids)
+        rich_menu = await render_screen(ctx, Screen.MENU, "")
+        used_eids = {
+            b.icon_custom_emoji_id
+            for row in rich_menu.reply_markup.inline_keyboard
+            for b in row
+            if getattr(b, "icon_custom_emoji_id", None)
+        }
+        check(
+            "При активном custom_emoji-паке меню использует >= 6 оттенков 10-тоновой палитры",
+            len(used_eids) >= 6,
+            f"used={len(used_eids)}",
+        )
+
+        class NoPremiumEmojiBot(BotSpy):
+            async def send_photo(self, **kwargs: Any) -> SimpleNamespace:
+                rm = kwargs.get("reply_markup")
+                if rm and any(
+                    getattr(btn_item, "icon_custom_emoji_id", None)
+                    for r in rm.inline_keyboard
+                    for btn_item in r
+                ):
+                    from aiogram.exceptions import TelegramBadRequest
+                    from aiogram.methods import SendPhoto
+
+                    raise TelegramBadRequest(
+                        method=SendPhoto(chat_id=1, photo="x"),
+                        message="Bad Request: BUTTON_CUSTOM_EMOJI_INVALID",
+                    )
+                return await super().send_photo(**kwargs)
+
+        fallback_bot = NoPremiumEmojiBot()
+        sent_mid = await send_photo_screen(
+            fallback_bot, 777, rich_menu.card, rich_menu.caption, rich_menu.reply_markup
+        )
+        sent_payload = fallback_bot.calls[-1][1]
+        sent_rm = markup_of(sent_payload)
+        check(
+            "Без Premium бот автоматически откатывает icon_custom_emoji_id и восстанавливает глифы",
+            sent_mid > 0
+            and all(
+                getattr(btn_item, "icon_custom_emoji_id", None) is None
+                for r in sent_rm.inline_keyboard
+                for btn_item in r
+            )
+            and sent_rm.inline_keyboard[0][0].text.startswith("🎮"),
+        )
+    finally:
+        reset_custom_emoji_state()
 
     # Проверка полного отсутствия данных реального клуба в демо-сборке
     env_example_txt = (

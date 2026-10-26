@@ -89,7 +89,7 @@ TARIFFS: tuple[Tariff, ...] = (
     Tariff(
         key="vip",
         title="VIP",
-        emoji="🟠",
+        emoji="🟡",
         pcs=10,
         hour1=170,
         hour3=460,
@@ -103,7 +103,7 @@ TARIFFS: tuple[Tariff, ...] = (
     Tariff(
         key="svip",
         title="S VIP",
-        emoji="🔥",
+        emoji="🟠",
         pcs=5,
         hour1=230,
         hour3=620,
@@ -163,7 +163,7 @@ FAQ_ITEMS: tuple[FaqItem, ...] = (
     ),
     FaqItem(
         key="packages",
-        emoji="🌅",
+        emoji="☀️",
         question="Какие ещё есть пакеты?",
         answer=(
             "• Утро (<b>{morning_slot}</b>)\n"
@@ -174,7 +174,7 @@ FAQ_ITEMS: tuple[FaqItem, ...] = (
     ),
     FaqItem(
         key="prepay",
-        emoji="💵",
+        emoji="💰",
         question="Нужна ли предоплата?",
         answer=(
             "Предоплату берём <b>только на ночные пакеты и только в выходные (ПТ–ВС)</b> "
@@ -200,13 +200,13 @@ FAQ_ITEMS: tuple[FaqItem, ...] = (
     ),
     FaqItem(
         key="faceit",
-        emoji="🎮",
+        emoji="🎯",
         question="Работает ли FACEIT?",
         answer="Да, FACEIT работает — на любом зале.",
     ),
     FaqItem(
         key="late",
-        emoji="⏰",
+        emoji="⏱",
         question="Можно приехать позже или снять человека?",
         answer=(
             "Опоздать можно, если это <b>не ночной пакет в выходные</b>: при опоздании "
@@ -217,7 +217,7 @@ FAQ_ITEMS: tuple[FaqItem, ...] = (
     ),
     FaqItem(
         key="scam",
-        emoji="🚫",
+        emoji="🛡",
         question="Как не попасться на мошенников?",
         answer=(
             "Мошенники представляются именами администрации и пишут в личные "

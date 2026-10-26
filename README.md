@@ -130,6 +130,7 @@ python main.py
 | `python main.py`               | запуск бота (long polling + автосинхронизация About/Description) |
 | `python main.py --init-db`     | создать базу и применить схему, не запуская бота (токен не нужен) |
 | `python main.py --print-profile` | вывести готовые тексты About, Description и пути к картинке 640×360 |
+| `python main.py --print-palette` | показать 10-тоновую палитру inline-кнопок и правила поверхностей 60–30–10 |
 | `python main.py --version`     | показать версию                                                |
 | `python main.py --help`        | справка по флагам                                              |
 
@@ -564,6 +565,7 @@ Admiral-club/
 ├── .gitignore                 # .env, data/, *.db, .venv — в Git не попадают
 ├── bot/
 │   ├── config.py              # чтение .env: BOT_TOKEN, ADMIN_IDS, TZ + ClubInfo (клуб)
+│   ├── palette.py             # 10-тоновая палитра inline-кнопок + правило 60–30–10 (без «гирлянды»)
 │   ├── texts.py               # ВСЕ тексты: прайс, правила, FAQ, 152-ФЗ, шаблоны
 │   ├── states.py              # BookingFSM (бронь) и AdminFSM (ввод ID админа)
 │   ├── db/
@@ -578,6 +580,7 @@ Admiral-club/
 │   │   ├── description_pic.jpg      # лёгкая JPEG-версия 640×360 для /setdescriptionpic
 │   │   ├── description_pic_hd.png   # HD-версия баннера описания 1280×720
 │   │   ├── logo.png                 # гексагональная эмблема сверхновой для карточек (RGBA)
+│   │   ├── button_icons/            # 10 векторных 100×100 RGBA бейджей для icon_custom_emoji_id
 │   │   ├── backgrounds/             # абстрактные неоновые фоны #FF6224 → #24F0A8 (1280×720)
 │   │   └── fonts/                   # кириллические шрифты Unbounded, Manrope, JetBrains Mono (OFL)
 │   ├── ui/
@@ -686,7 +689,7 @@ python tests/smoke_test.py
 
 ```
 ================================================================
-Проверок выполнено: 632, успешно: 632, ошибок: 0
+Проверок выполнено: 686, успешно: 686, ошибок: 0
 Все проверки пройдены ✅
 ================================================================
 ```

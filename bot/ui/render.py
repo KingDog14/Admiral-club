@@ -51,8 +51,6 @@ from bot.keyboards.inline import (
 from bot.services.admins import AdminRegistry
 from bot.states import DATA_CLIENT_NAME, DATA_TARIFF_KEY, DATA_TIME_KEY, DATA_TIME_SLOT
 from bot.ui.cards import (
-    COL_CYAN,
-    COL_GOLD,
     COL_RED,
     RenderedCard,
     clean_card_text,
@@ -66,6 +64,14 @@ from bot.ui.cards import (
     render_prices_card,
     render_ticket_card,
     render_wizard_card,
+)
+from bot.ui.palette import (
+    FAQ_TONES,
+    TARIFF_TONES,
+    TIME_TONES,
+    Surface,
+    Tone,
+    tone_rgba,
 )
 from bot.ui.screens import (
     BTN_BACK,
@@ -184,10 +190,13 @@ async def _fsm(ctx: ViewContext) -> dict[str, Any]:
 
 
 def _with_step_nav(*rows: Sequence[ButtonSpec]) -> InlineKeyboardMarkup:
-    """Клавиатура шага мастера: кнопки шага + «‹ Шаг назад» и «✕ Отменить»."""
+    """Клавиатура шага мастера: кнопки шага + спокойный «‹ Шаг назад» и «✕ Отменить»."""
     prepared: list[Sequence[ButtonSpec]] = list(rows)
     prepared.append(
-        [(BTN_STEP_BACK, CB_BOOKING_BACK), (BTN_CANCEL, CB_BOOKING_CANCEL, "danger")]
+        [
+            (BTN_STEP_BACK, CB_BOOKING_BACK, Surface.GLASS, Tone.SLATE),
+            (BTN_CANCEL, CB_BOOKING_CANCEL, Surface.DANGER, Tone.RUBY),
+        ]
     )
     return keyboard(*prepared)
 
@@ -234,10 +243,10 @@ async def _render_prices(ctx: ViewContext, _arg: str) -> ScreenView:
         card=render_prices_card(club),
         caption=_compose(Screen.PRICES, club, body),
         reply_markup=footer_rows(
-            [(BTN_BOOK_HERO, nav(Screen.BOOK_TARIFF), "success")],
+            [(BTN_BOOK_HERO, nav(Screen.BOOK_TARIFF), Surface.HERO, Tone.MINT)],
             [
-                ("❓ Частые вопросы", nav(Screen.FAQ), "primary"),
-                ("📜 Правила", nav(Screen.RULES), "primary"),
+                ("💡 Частые вопросы", nav(Screen.FAQ), Surface.GLASS, Tone.AMBER),
+                ("📘 Правила", nav(Screen.RULES), Surface.GLASS, Tone.INDIGO),
             ],
         ),
     )
@@ -275,7 +284,7 @@ async def _render_rules(ctx: ViewContext, arg: str) -> ScreenView:
                     f"Любые сомнения — звоните в клуб: {club.admin_phone}.",
                 ),
             ],
-            accent=COL_GOLD,
+            accent=tone_rgba(Tone.AMBER),
         )
     elif tab == texts.RULES_TAB_CLUB:
         extra = "порядок в зале"
@@ -301,7 +310,7 @@ async def _render_rules(ctx: ViewContext, arg: str) -> ScreenView:
                 ),
                 ("Оборудование", "При любом сбое сразу позовите администратора смены."),
             ],
-            accent=COL_CYAN,
+            accent=tone_rgba(Tone.CRYO),
         )
     else:
         extra = "основное"
@@ -330,7 +339,7 @@ async def _render_rules(ctx: ViewContext, arg: str) -> ScreenView:
                     f"Ночь ({texts.NIGHT_SLOT}) до 18 лет — только с согласия родителей.",
                 ),
             ],
-            accent=COL_CYAN,
+            accent=tone_rgba(Tone.INDIGO),
         )
 
     body = texts.render(
@@ -364,7 +373,7 @@ async def _render_faq_list(ctx: ViewContext, _arg: str) -> ScreenView:
             ),
             ("FACEIT и залы", "FACEIT работает во всех 4 залах клуба."),
         ],
-        accent=COL_CYAN,
+        accent=tone_rgba(Tone.AMBER),
     )
     body = "Выберите вопрос в списке кнопок ниже:"
     return ScreenView(
@@ -380,6 +389,7 @@ async def _render_faq_item(ctx: ViewContext, arg: str) -> ScreenView:
         return await _render_faq_list(ctx, "")
     club = ctx.cfg.club
     answer_html = texts.faq_answer(item, club)
+    item_tone = FAQ_TONES.get(item.key, Tone.SAPPHIRE)
     card = render_info_card(
         club,
         cache_tag=f"faq_{item.key}",
@@ -390,7 +400,7 @@ async def _render_faq_item(ctx: ViewContext, arg: str) -> ScreenView:
             ("Ответ клуба", _strip_html(answer_html)),
             ("Связь с админом", f"{club.admin_phone} ({club.admin_name})"),
         ],
-        accent=COL_CYAN,
+        accent=tone_rgba(item_tone),
     )
     body = f"<b>{item.emoji} {escape_html(item.question)}</b>\n\n<blockquote>{answer_html}</blockquote>"
     return ScreenView(
@@ -412,18 +422,18 @@ async def _render_contacts(ctx: ViewContext, _arg: str) -> ScreenView:
                 btn(
                     "💳 Скопировать реквизиты",
                     copy_value=club.payment_card,
-                    style="success",
+                    style=Surface.ACCENT,
+                    tone=Tone.SAPPHIRE,
                 ),
                 btn(
                     "📞 Скопировать телефон",
                     copy_value=club.admin_phone,
-                    style="primary",
+                    style=Surface.ACCENT,
+                    tone=Tone.CRYO,
                 ),
             ],
-            [
-                (BTN_BOOK_HERO, nav(Screen.BOOK_TARIFF), "success"),
-                ("🖥 Залы и цены", nav(Screen.PRICES), "primary"),
-            ],
+            [(BTN_BOOK_HERO, nav(Screen.BOOK_TARIFF), Surface.HERO, Tone.MINT)],
+            [("🖥 Залы и цены", nav(Screen.PRICES), Surface.GLASS, Tone.AMBER)],
         ),
     )
 
@@ -450,10 +460,8 @@ async def _render_bookings(ctx: ViewContext, _arg: str) -> ScreenView:
         card=render_bookings_list_card(club, bookings, ctx.cfg.timezone),
         caption=_compose(Screen.BOOKINGS, club, body),
         reply_markup=footer_rows(
-            [
-                (BTN_BOOK_HERO, nav(Screen.BOOK_TARIFF), "success"),
-                (BTN_REFRESH, nav(Screen.BOOKINGS), "primary"),
-            ],
+            [(BTN_BOOK_HERO, nav(Screen.BOOK_TARIFF), Surface.HERO, Tone.MINT)],
+            [(BTN_REFRESH, nav(Screen.BOOKINGS), Surface.GLASS, Tone.SLATE)],
         ),
     )
 
@@ -461,22 +469,6 @@ async def _render_bookings(ctx: ViewContext, _arg: str) -> ScreenView:
 # --------------------------------------------------------------------------- #
 # Мастер бронирования (4 шага)
 # --------------------------------------------------------------------------- #
-_TARIFF_BTN_STYLES: dict[str, str] = {
-    "standart": "success",
-    "vip": "primary",
-    "svip": "danger",
-    "double": "primary",
-}
-
-_TIME_BTN_STYLES: dict[str, str] = {
-    texts.TIME_NOW_KEY: "success",
-    texts.TIME_MORNING_KEY: "primary",
-    texts.TIME_DAY_KEY: "primary",
-    texts.TIME_NIGHT_KEY: "success",
-    texts.TIME_OTHER_KEY: "primary",
-}
-
-
 async def _render_book_tariff(ctx: ViewContext, _arg: str) -> ScreenView:
     club = ctx.cfg.club
     today = datetime.now(ctx.cfg.timezone).date()
@@ -490,13 +482,17 @@ async def _render_book_tariff(ctx: ViewContext, _arg: str) -> ScreenView:
             (
                 f"{tariff.emoji} {tariff.title} · {tariff.hour1} ₽/ч",
                 f"{CB_TARIFF_PREFIX}{tariff.key}",
-                _TARIFF_BTN_STYLES.get(tariff.key, "primary"),
+                Surface.GLASS,
+                TARIFF_TONES.get(tariff.key, Tone.MINT),
             )
             for tariff in texts.TARIFFS
         ]
     )
     rows.append(
-        [(BTN_BACK, CB_BOOKING_BACK), (BTN_CANCEL, CB_BOOKING_CANCEL, "danger")]
+        [
+            (BTN_BACK, CB_BOOKING_BACK, Surface.GLASS, Tone.SLATE),
+            (BTN_CANCEL, CB_BOOKING_CANCEL, Surface.DANGER, Tone.RUBY),
+        ]
     )
     return ScreenView(
         card=render_wizard_card(
@@ -525,12 +521,15 @@ async def _render_book_time(ctx: ViewContext, _arg: str) -> ScreenView:
         now_time=now_text(ctx.cfg.timezone),
         now_date=today_date_text(ctx.cfg.timezone),
     )
-    rows = _pairs(
-        [
-            (label, f"{CB_TIME_PREFIX}{key}", _TIME_BTN_STYLES.get(key, "primary"))
-            for key, label in texts.TIME_CHOICES
-        ]
-    )
+    rows: list[Sequence[ButtonSpec]] = []
+    rest_choices: list[ButtonSpec] = []
+    for key, label in texts.TIME_CHOICES:
+        tone = TIME_TONES.get(key, Tone.SAPPHIRE)
+        if key == texts.TIME_NOW_KEY:
+            rows.append([(label, f"{CB_TIME_PREFIX}{key}", Surface.HERO, tone)])
+        else:
+            rest_choices.append((label, f"{CB_TIME_PREFIX}{key}", Surface.GLASS, tone))
+    rows.extend(_pairs(rest_choices))
     return ScreenView(
         card=render_wizard_card(
             club,
@@ -630,12 +629,21 @@ async def _render_book_pay(ctx: ViewContext, _arg: str) -> ScreenView:
     )
 
     rows: list[Sequence[ButtonSpec]] = [
-        [("📸 Оплатил — отправить чек", CB_PAY_CHECK, "success")],
+        [("📸 Оплатил — отправить чек", CB_PAY_CHECK, Surface.HERO, Tone.MINT)],
     ]
     if not required:
-        rows.append([("💵 Оплачу на месте", CB_PAY_SPOT, "primary")])
+        rows.append(
+            [("💵 Оплачу на месте", CB_PAY_SPOT, Surface.GLASS, Tone.JADE)]
+        )
     rows.append(
-        [btn("💳 Скопировать реквизиты", copy_value=club.payment_card, style="primary")]
+        [
+            btn(
+                "💳 Скопировать реквизиты",
+                copy_value=club.payment_card,
+                style=Surface.GLASS,
+                tone=Tone.SAPPHIRE,
+            )
+        ]
     )
 
     return ScreenView(
@@ -690,7 +698,8 @@ async def _render_book_receipt(ctx: ViewContext, _arg: str) -> ScreenView:
                 btn(
                     "💳 Скопировать реквизиты",
                     copy_value=club.payment_card,
-                    style="primary",
+                    style=Surface.ACCENT,
+                    tone=Tone.SAPPHIRE,
                 )
             ]
         ),
@@ -724,7 +733,9 @@ async def _render_book_done(ctx: ViewContext, arg: str) -> ScreenView:
     return ScreenView(
         card=render_ticket_card(club, booking),
         caption=_compose(Screen.BOOK_DONE, club, body),
-        reply_markup=footer_rows([("📋 Мои брони", nav(Screen.BOOKINGS), "success")]),
+        reply_markup=footer_rows(
+            [("📋 Мои брони", nav(Screen.BOOKINGS), Surface.ACCENT, Tone.SAPPHIRE)]
+        ),
     )
 
 
@@ -748,7 +759,7 @@ async def _render_consent(ctx: ViewContext, _arg: str) -> ScreenView:
             ("Отзыв в 1 клик", "Раздел /privacy отключает обработку в любой момент."),
             ("Оператор", f"{club.name}, г. {club.city} · {club.admin_phone}"),
         ],
-        accent=COL_CYAN,
+        accent=tone_rgba(Tone.INDIGO),
     )
     body = texts.render(texts.SCREEN_CONSENT_CARD_BODY, club)
     return ScreenView(
@@ -778,14 +789,14 @@ async def _render_privacy(ctx: ViewContext, _arg: str) -> ScreenView:
                 f"По обращению к {club.admin_phone} в течение 10 раб. дней.",
             ),
         ],
-        accent=COL_CYAN,
+        accent=tone_rgba(Tone.INDIGO),
     )
     body = texts.render(texts.SCREEN_PRIVACY_CARD_BODY, club)
     return ScreenView(
         card=card,
         caption=_compose(Screen.PRIVACY, club, body),
         reply_markup=footer_rows(
-            [("🚫 Отозвать согласие", CB_CONSENT_REVOKE, "danger")]
+            [("🚫 Отозвать согласие", CB_CONSENT_REVOKE, Surface.DANGER, Tone.RUBY)]
         ),
     )
 
@@ -864,14 +875,17 @@ async def _render_admin(ctx: ViewContext, _arg: str) -> ScreenView:
             (
                 pending_label,
                 nav(Screen.ADMIN_PENDING, 0),
-                "success" if stats.pending else "primary",
+                Surface.HERO if stats.pending else Surface.ACCENT,
+                Tone.MINT if stats.pending else Tone.SAPPHIRE,
             )
         ],
-        [("👥 Администраторы", nav(Screen.ADMIN_ADMINS), "primary")],
         [
-            (BTN_REFRESH, nav(Screen.ADMIN), "primary"),
-            (BTN_BACK, nav(SCREEN_BACK)),
-            (BTN_HOME, nav(Screen.MENU), "success"),
+            ("👥 Администраторы", nav(Screen.ADMIN_ADMINS), Surface.GLASS, Tone.AMETHYST),
+            (BTN_REFRESH, nav(Screen.ADMIN), Surface.GLASS, Tone.SLATE),
+        ],
+        [
+            (BTN_BACK, nav(SCREEN_BACK), Surface.GLASS, Tone.SLATE),
+            (BTN_HOME, nav(Screen.MENU), Surface.GLASS, Tone.SLATE),
         ],
     ]
     return ScreenView(
@@ -922,21 +936,36 @@ async def _render_admin_pending(ctx: ViewContext, arg: str) -> ScreenView:
 
     rows: list[Sequence[ButtonSpec]] = [
         [
-            (f"✅ №{booking.id}", admin_approve_callback(booking.id), "success"),
-            (f"❌ №{booking.id}", admin_reject_callback(booking.id), "danger"),
+            (
+                f"✅ №{booking.id}",
+                admin_approve_callback(booking.id),
+                Surface.HERO,
+                Tone.MINT,
+            ),
+            (
+                f"❌ №{booking.id}",
+                admin_reject_callback(booking.id),
+                Surface.DANGER,
+                Tone.RUBY,
+            ),
         ]
         for booking, _user in entries
     ]
     if pages > 1:
         rows.append(
             [
-                ("◀", nav(Screen.ADMIN_PENDING, max(0, page - 1)), "primary"),
-                (f"{page + 1}/{pages}", nav(Screen.ADMIN_PENDING, page)),
-                ("▶", nav(Screen.ADMIN_PENDING, min(pages - 1, page + 1)), "primary"),
+                ("◀", nav(Screen.ADMIN_PENDING, max(0, page - 1)), Surface.GLASS, Tone.SLATE),
+                (f"{page + 1}/{pages}", nav(Screen.ADMIN_PENDING, page), Surface.GLASS, Tone.SLATE),
+                ("▶", nav(Screen.ADMIN_PENDING, min(pages - 1, page + 1)), Surface.GLASS, Tone.SLATE),
             ]
         )
-    rows.append([(BTN_REFRESH, nav(Screen.ADMIN_PENDING, page), "primary")])
-    rows.append([(BTN_BACK, nav(SCREEN_BACK)), (BTN_HOME, nav(Screen.MENU), "success")])
+    rows.append([(BTN_REFRESH, nav(Screen.ADMIN_PENDING, page), Surface.GLASS, Tone.SLATE)])
+    rows.append(
+        [
+            (BTN_BACK, nav(SCREEN_BACK), Surface.GLASS, Tone.SLATE),
+            (BTN_HOME, nav(Screen.MENU), Surface.GLASS, Tone.SLATE),
+        ]
+    )
     extra = f"стр. {page + 1}/{pages}" if pages > 1 else ""
     return ScreenView(
         card=render_admin_pending_card(
@@ -982,24 +1011,30 @@ async def _render_admin_admins(ctx: ViewContext, _arg: str) -> ScreenView:
         label = await _admin_short_label(ctx, admin.user_id)
         mark = "👑" if admin.is_owner else "👤"
         state = "🟢" if admin.is_active else "🔴"
-        adm_style = (
-            "danger"
+        adm_tone = (
+            Tone.RUBY
             if not admin.is_active
-            else ("success" if admin.is_owner else "primary")
+            else (Tone.AMBER if admin.is_owner else Tone.MINT)
         )
         rows.append(
             [
                 (
                     f"{state} {mark} {label}",
                     nav(Screen.ADMIN_ADMIN, admin.user_id),
-                    adm_style,
+                    Surface.GLASS,
+                    adm_tone,
                 )
             ]
         )
     if viewer_is_owner:
-        rows.append([("➕ Добавить", CB_ADMIN_ADD, "success")])
-    rows.append([(BTN_REFRESH, nav(Screen.ADMIN_ADMINS), "primary")])
-    rows.append([(BTN_BACK, nav(SCREEN_BACK)), (BTN_HOME, nav(Screen.MENU), "success")])
+        rows.append([("➕ Добавить", CB_ADMIN_ADD, Surface.HERO, Tone.MINT)])
+    rows.append([(BTN_REFRESH, nav(Screen.ADMIN_ADMINS), Surface.GLASS, Tone.SLATE)])
+    rows.append(
+        [
+            (BTN_BACK, nav(SCREEN_BACK), Surface.GLASS, Tone.SLATE),
+            (BTN_HOME, nav(Screen.MENU), Surface.GLASS, Tone.SLATE),
+        ]
+    )
     return ScreenView(
         card=render_admin_team_card(club, admins),
         caption=_compose(Screen.ADMIN_ADMINS, club, "\n\n".join(blocks)),
@@ -1044,7 +1079,8 @@ async def _render_admin_card(ctx: ViewContext, arg: str) -> ScreenView:
                 (
                     "⛔️ Отключить" if admin.is_active else "✅ Включить",
                     admin_toggle_callback(admin.user_id),
-                    "danger" if admin.is_active else "success",
+                    Surface.GLASS if admin.is_active else Surface.HERO,
+                    Tone.AMBER if admin.is_active else Tone.MINT,
                 )
             ]
         )
@@ -1054,7 +1090,8 @@ async def _render_admin_card(ctx: ViewContext, arg: str) -> ScreenView:
                 (
                     "👑 Сделать владельцем",
                     admin_promote_callback(admin.user_id),
-                    "primary",
+                    Surface.ACCENT,
+                    Tone.AMBER,
                 )
             )
         if admin.role != AdminRole.OPERATOR:
@@ -1062,18 +1099,30 @@ async def _render_admin_card(ctx: ViewContext, arg: str) -> ScreenView:
                 (
                     "👤 Сделать оператором",
                     admin_demote_callback(admin.user_id),
-                    "primary",
+                    Surface.ACCENT,
+                    Tone.SAPPHIRE,
                 )
             )
         if role_row:
             rows.append(role_row)
-        rows.append([("🗑 Удалить", admin_delete_callback(admin.user_id), "danger")])
+        rows.append(
+            [
+                (
+                    "🗑 Удалить",
+                    admin_delete_callback(admin.user_id),
+                    Surface.DANGER,
+                    Tone.RUBY,
+                )
+            ]
+        )
 
-    rows.append([(BTN_REFRESH, nav(Screen.ADMIN_ADMIN, admin.user_id), "primary")])
+    rows.append(
+        [(BTN_REFRESH, nav(Screen.ADMIN_ADMIN, admin.user_id), Surface.GLASS, Tone.SLATE)]
+    )
     rows.append(
         [
-            ("◀ К списку", nav(Screen.ADMIN_ADMINS), "primary"),
-            (BTN_HOME, nav(Screen.MENU), "success"),
+            ("◀ К списку", nav(Screen.ADMIN_ADMINS), Surface.GLASS, Tone.SLATE),
+            (BTN_HOME, nav(Screen.MENU), Surface.GLASS, Tone.SLATE),
         ]
     )
     return ScreenView(
@@ -1090,7 +1139,7 @@ async def _render_admin_add(ctx: ViewContext, _arg: str) -> ScreenView:
     return ScreenView(
         card=render_admin_team_card(club, all_admins, adding=True),
         caption=_compose(Screen.ADMIN_ADD, club, body),
-        reply_markup=keyboard([(BTN_CANCEL, CB_ADMIN_ADD_CANCEL, "danger")]),
+        reply_markup=keyboard([(BTN_CANCEL, CB_ADMIN_ADD_CANCEL, Surface.DANGER, Tone.RUBY)]),
     )
 
 

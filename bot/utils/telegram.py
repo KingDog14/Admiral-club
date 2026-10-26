@@ -26,6 +26,38 @@ def _is_not_modified(exc: BaseException) -> bool:
     return "message is not modified" in str(exc).lower()
 
 
+def _is_custom_emoji_rejected(exc: BaseException) -> bool:
+    low = str(exc).lower()
+    return any(
+        token in low
+        for token in (
+            "button_custom_emoji",
+            "custom_emoji",
+            "premium_account_required",
+            "document_invalid",
+        )
+    )
+
+
+def _prepare_markup(bot: Bot, reply_markup: InlineKeyboardMarkup | None) -> InlineKeyboardMarkup | None:
+    if reply_markup is None:
+        return None
+    from bot.palette import prepare_markup_for_bot
+
+    return prepare_markup_for_bot(reply_markup, _bot_key(bot))
+
+
+def _strip_rejected_custom_emoji(
+    bot: Bot, reply_markup: InlineKeyboardMarkup | None
+) -> InlineKeyboardMarkup | None:
+    if reply_markup is None:
+        return None
+    from bot.palette import disable_custom_emoji_for_bot, strip_custom_emoji_markup
+
+    disable_custom_emoji_for_bot(_bot_key(bot))
+    return strip_custom_emoji_markup(reply_markup)
+
+
 def _extract_photo_file_id(message: Any) -> str | None:
     photos = getattr(message, "photo", None)
     if photos and isinstance(photos, (list, tuple)):
@@ -47,16 +79,20 @@ async def safe_edit_message_text(
     reply_markup: InlineKeyboardMarkup | None = None,
 ) -> bool:
     """Отредактировать текст сообщения; вернуть ``True`` при успехе."""
+    markup = _prepare_markup(bot, reply_markup)
     try:
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=message_id,
             text=text,
-            reply_markup=reply_markup,
+            reply_markup=markup,
         )
     except TelegramAPIError as exc:
         if _is_not_modified(exc):
             return True
+        if markup is not None and _is_custom_emoji_rejected(exc):
+            plain_markup = _strip_rejected_custom_emoji(bot, markup)
+            return await safe_edit_message_text(bot, chat_id, message_id, text, plain_markup)
         logger.debug("Не удалось отредактировать сообщение %s/%s: %s", chat_id, message_id, exc)
         return False
     return True
@@ -70,16 +106,20 @@ async def safe_edit_message_caption(
     reply_markup: InlineKeyboardMarkup | None = None,
 ) -> bool:
     """Отредактировать подпись под фото (чек); вернуть ``True`` при успехе."""
+    markup = _prepare_markup(bot, reply_markup)
     try:
         await bot.edit_message_caption(
             chat_id=chat_id,
             message_id=message_id,
             caption=caption,
-            reply_markup=reply_markup,
+            reply_markup=markup,
         )
     except TelegramAPIError as exc:
         if _is_not_modified(exc):
             return True
+        if markup is not None and _is_custom_emoji_rejected(exc):
+            plain_markup = _strip_rejected_custom_emoji(bot, markup)
+            return await safe_edit_message_caption(bot, chat_id, message_id, caption, plain_markup)
         logger.debug("Не удалось отредактировать подпись %s/%s: %s", chat_id, message_id, exc)
         return False
     return True
@@ -97,6 +137,7 @@ async def safe_edit_message_media(
     from bot.ui.cards import card_cache
 
     bkey = _bot_key(bot)
+    markup = _prepare_markup(bot, reply_markup)
     cached_fid = card_cache.get_file_id(bkey, card.cache_key)
 
     for attempt_fid in ([cached_fid, None] if cached_fid else [None]):
@@ -115,7 +156,7 @@ async def safe_edit_message_media(
                 chat_id=chat_id,
                 message_id=message_id,
                 media=media,
-                reply_markup=reply_markup,
+                reply_markup=markup,
             )
             fid = _extract_photo_file_id(edited)
             if fid:
@@ -124,6 +165,9 @@ async def safe_edit_message_media(
         except TelegramAPIError as exc:
             if _is_not_modified(exc):
                 return True
+            if markup is not None and _is_custom_emoji_rejected(exc):
+                plain_markup = _strip_rejected_custom_emoji(bot, markup)
+                return await safe_edit_message_media(bot, chat_id, message_id, card, caption, plain_markup)
             if attempt_fid is not None:
                 card_cache.invalidate_file_id(bkey, card.cache_key)
                 continue
@@ -143,6 +187,7 @@ async def send_photo_screen(
     from bot.ui.cards import card_cache
 
     bkey = _bot_key(bot)
+    markup = _prepare_markup(bot, reply_markup)
     cached_fid = card_cache.get_file_id(bkey, card.cache_key)
 
     for attempt_fid in ([cached_fid, None] if cached_fid else [None]):
@@ -156,13 +201,16 @@ async def send_photo_screen(
                 chat_id=chat_id,
                 photo=photo_input,
                 caption=caption,
-                reply_markup=reply_markup,
+                reply_markup=markup,
             )
             fid = _extract_photo_file_id(sent)
             if fid:
                 card_cache.put_file_id(bkey, card.cache_key, fid)
             return int(getattr(sent, "message_id", 0) or 0)
         except TelegramAPIError as exc:
+            if markup is not None and _is_custom_emoji_rejected(exc):
+                plain_markup = _strip_rejected_custom_emoji(bot, markup)
+                return await send_photo_screen(bot, chat_id, card, caption, plain_markup)
             if attempt_fid is not None:
                 card_cache.invalidate_file_id(bkey, card.cache_key)
                 continue
