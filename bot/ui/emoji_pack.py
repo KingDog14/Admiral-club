@@ -82,10 +82,14 @@ async def sync_inline_emoji_pack(
     owner_id: int,
     club_name: str,
 ) -> dict[str, str]:
-    """Подключить или автоматически создать 10-тоновый custom_emoji-пак кнопок."""
-    mode = (os.getenv("INLINE_CUSTOM_ICONS") or "auto").strip().lower()
+    """Подключить или автоматически создать 10-тоновый custom_emoji-пак кнопок.
+
+    По умолчанию отключено (``INLINE_CUSTOM_ICONS=off``), чтобы во всех клиентах
+    Telegram гарантированно отображались понятные стандартные эмодзи кнопок без
+    риска тихого игнорирования ``icon_custom_emoji_id`` у ботов без Premium.
+    """
+    mode = (os.getenv("INLINE_CUSTOM_ICONS") or "off").strip().lower()
     if mode in ("0", "off", "false", "no", "none", "disabled"):
-        logger.info("Кастомные RGB-иконки inline-кнопок отключены (INLINE_CUSTOM_ICONS=%s)", mode)
         return {}
 
     explicit_raw = (os.getenv("INLINE_EMOJI_IDS") or "").strip()

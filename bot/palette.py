@@ -191,7 +191,7 @@ TONES: Final[dict[str, ToneSpec]] = {
         title="Crimson Ruby",
         hex_color="#FF485C",
         rgba=(255, 72, 92, 255),
-        glyph="✕",
+        glyph="❌",
         sticker_emoji="❗️",
         icon_filename="ruby.png",
         role="Отмена, отклонение, отзыв согласия и защита от мошенников",
@@ -201,7 +201,7 @@ TONES: Final[dict[str, ToneSpec]] = {
         title="Frost Slate",
         hex_color="#94A3B8",
         rgba=(148, 163, 184, 255),
-        glyph="◀",
+        glyph="⬅️",
         sticker_emoji="▫️",
         icon_filename="slate.png",
         role="Спокойная навигация: Назад, В меню, Обновить, пагинация",
@@ -268,9 +268,14 @@ _CUSTOM_EMOJI_IDS: dict[str, str] = {}
 _DISABLED_BOT_KEYS: set[int] = set()
 _FALLBACK_TEXT_BY_EMOJI_ID: dict[str, str] = {}
 
-_LEADING_EMOJI_RE = re.compile(
-    r"^(?:[\U0001f1e0-\U0001faff\u2600-\u27bf\ufe0f\u200d]+)\s+"
+_HAS_EMOJI_RE = re.compile(
+    r"[\U0001f000-\U0001faff\u2190-\u21ff\u2300-\u23ff\u25a0-\u27bf\u2b00-\u2bff]"
 )
+
+
+def button_has_emoji(text: str) -> bool:
+    """Проверить, что в подписи кнопки есть видимый эмодзи-значок."""
+    return bool(_HAS_EMOJI_RE.search(text or ""))
 
 
 def parse_custom_emoji_mapping(raw: str) -> dict[str, str]:
@@ -329,20 +334,21 @@ def reset_custom_emoji_state() -> None:
 
 
 def apply_tone_icon(text: str, tone: str | None) -> tuple[str, str | None]:
-    """Подготовить ``(text, icon_custom_emoji_id)`` для кнопки.
+    """Подготовить ``(text, icon_custom_emoji_id)`` для кнопки, ВСЕГДА сохраняя эмодзи в тексте.
 
-    * Если ``custom_emoji`` не подключены — возвращает исходный ``text`` с его
-      аккуратным цветовым глифом и ``None``.
-    * Если ``custom_emoji`` подключены — подставляет 24-битную RGB-иконку тона в
-      ``icon_custom_emoji_id``, а ведущий дублирующий эмодзи убирает, сохраняя
-      исходную подпись для мгновенного отката при отсутствии Premium.
+    Стандартные эмодзи в ``text`` никогда не вырезаются: на клиентах и у ботов без
+    Telegram Premium Telegram может молча проигнорировать ``icon_custom_emoji_id``
+    без ошибки API, поэтому понятный эмодзи в самой строке кнопки обязан быть всегда.
+    Если в ``text`` вдруг нет эмодзи, а тон задан — автоматически подставляется глиф тона.
     """
+    label = (text or "").strip()
+    if label and not button_has_emoji(label) and tone in TONES:
+        label = f"{TONES[tone].glyph} {label}"
     eid = get_custom_emoji_id(tone)
     if not eid:
-        return text, None
-    stripped = _LEADING_EMOJI_RE.sub("", text).strip() or text
-    _FALLBACK_TEXT_BY_EMOJI_ID[f"{eid}:{stripped}"] = text
-    return stripped, eid
+        return label, None
+    _FALLBACK_TEXT_BY_EMOJI_ID[f"{eid}:{label}"] = label
+    return label, eid
 
 
 def strip_custom_emoji_markup(
@@ -428,6 +434,8 @@ def audit_keyboard_harmony(
         row_styles: set[str] = set()
         for button in row:
             total += 1
+            if not button_has_emoji(button.text):
+                issues.append(f"Кнопка без эмодзи: {button.text!r}")
             style = getattr(button, "style", None)
             cb = getattr(button, "callback_data", None) or ""
             if not style:
@@ -505,6 +513,7 @@ __all__ = [
     "ToneSpec",
     "apply_tone_icon",
     "audit_keyboard_harmony",
+    "button_has_emoji",
     "disable_custom_emoji_for_bot",
     "format_palette_summary",
     "get_custom_emoji_id",

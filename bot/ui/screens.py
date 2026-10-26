@@ -181,11 +181,11 @@ def nav(screen: str, arg: str | int = "") -> str:
 HUD_WIDTH: Final[int] = 28
 
 BTN_BOOK_HERO: Final[str] = "🎮 Забронировать место"
-BTN_BACK: Final[str] = "◀ Назад"
+BTN_BACK: Final[str] = "⬅️ Назад"
 BTN_HOME: Final[str] = "🏠 В меню"
 BTN_REFRESH: Final[str] = "🔄 Обновить"
-BTN_STEP_BACK: Final[str] = "‹ Шаг назад"
-BTN_CANCEL: Final[str] = "✕ Отменить"
+BTN_STEP_BACK: Final[str] = "↩️ Шаг назад"
+BTN_CANCEL: Final[str] = "❌ Отменить"
 
 
 def section(screen: str, club_name: str = "", extra: str = "") -> str:
@@ -354,7 +354,7 @@ def rules_tabs_keyboard(active_tab: str) -> InlineKeyboardMarkup:
     ]
     tab_row: list[ButtonSpec] = [
         (
-            f"• {label}" if key == active_tab else label,
+            label,
             nav(Screen.RULES, key),
             Surface.ACCENT if key == active_tab else Surface.GLASS,
             RULES_TAB_TONES.get(key, Tone.INDIGO),
@@ -387,7 +387,7 @@ def faq_list_keyboard() -> InlineKeyboardMarkup:
 def faq_answer_keyboard() -> InlineKeyboardMarkup:
     """Экран ответа FAQ: единый акцент возврата к списку и спокойный подвал."""
     return keyboard(
-        [("◀ К списку вопросов", nav(Screen.FAQ), Surface.ACCENT, Tone.SAPPHIRE)],
+        [("📚 К списку вопросов", nav(Screen.FAQ), Surface.ACCENT, Tone.SAPPHIRE)],
         back_row(),
     )
 
