@@ -32,7 +32,9 @@ from bot.keyboards.inline import CB_CONSENT_GIVE, consent_keyboard
 logger = logging.getLogger(__name__)
 
 #: Команды, которые доступны пользователю до получения согласия.
-ALLOWED_COMMANDS_BEFORE_CONSENT: frozenset[str] = frozenset({"/start", "/privacy"})
+ALLOWED_COMMANDS_BEFORE_CONSENT: frozenset[str] = frozenset(
+    {"/start", "/privacy", "/pdn"}
+)
 
 
 class ConsentMiddleware(BaseMiddleware):
@@ -97,7 +99,9 @@ class ConsentMiddleware(BaseMiddleware):
             return None
 
         if isinstance(event, Message):
-            first_word = (event.text or "").strip().split(maxsplit=1)[0] if event.text else ""
+            first_word = (
+                (event.text or "").strip().split(maxsplit=1)[0] if event.text else ""
+            )
             cmd = first_word.split("@", 1)[0]
             if cmd in ALLOWED_COMMANDS_BEFORE_CONSENT:
                 return await handler(event, data)
@@ -115,13 +119,17 @@ class ConsentMiddleware(BaseMiddleware):
                     state=state,
                     admins=data.get("admins"),
                 )
-                await navigator.show(Screen.CONSENT, push=False, note=texts.CONSENT_REQUIRED)
+                await navigator.show(
+                    Screen.CONSENT, push=False, note=texts.CONSENT_REQUIRED
+                )
                 return None
 
             await event.answer(texts.CONSENT_REQUIRED, reply_markup=consent_keyboard())
             return None
 
-        logger.debug("Событие %s отклонено: нет согласия на обработку ПДн", type(event).__name__)
+        logger.debug(
+            "Событие %s отклонено: нет согласия на обработку ПДн", type(event).__name__
+        )
         return None
 
 

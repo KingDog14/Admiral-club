@@ -36,15 +36,15 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from aiogram import Bot, Dispatcher  # noqa: E402
-from aiogram.client.default import DefaultBotProperties  # noqa: E402
-from aiogram.enums import ParseMode  # noqa: E402
-from aiogram.exceptions import TelegramBadRequest  # noqa: E402
-from aiogram.fsm.context import FSMContext  # noqa: E402
-from aiogram.fsm.storage.base import StorageKey  # noqa: E402
-from aiogram.fsm.storage.memory import MemoryStorage  # noqa: E402
-from aiogram.methods import EditMessageText  # noqa: E402
-from aiogram.types import (  # noqa: E402
+from aiogram import Bot, Dispatcher
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import StorageKey
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.methods import EditMessageText
+from aiogram.types import (
     CallbackQuery,
     Chat,
     Message,
@@ -54,30 +54,30 @@ from aiogram.types import (
     User as TelegramUser,
 )
 
-from bot import texts  # noqa: E402
-from bot.config import AppConfig, ClubInfo, ConfigError, load_config  # noqa: E402
-from bot.db.database import Database, init_database  # noqa: E402
-from bot.db.models import AdminRole, BookingStatus  # noqa: E402
-from bot.filters.access import IsAdmin, IsPrivateChat  # noqa: E402
-from bot.handlers import admin as admin_handlers  # noqa: E402
-from bot.handlers import client as client_handlers  # noqa: E402
-from bot.keyboards import inline as inline_keyboards  # noqa: E402
-from bot.keyboards import reply as reply_keyboards  # noqa: E402
-from bot.middlewares.consent import ConsentMiddleware  # noqa: E402
-from bot.services.admins import AdminRegistry  # noqa: E402
-from bot.services.booking import (  # noqa: E402
+from bot import texts
+from bot.config import AppConfig, ClubInfo, ConfigError, load_config
+from bot.db.database import Database, init_database
+from bot.db.models import AdminRole, BookingStatus
+from bot.filters.access import IsAdmin, IsPrivateChat
+from bot.handlers import admin as admin_handlers
+from bot.handlers import client as client_handlers
+from bot.keyboards import inline as inline_keyboards
+from bot.keyboards import reply as reply_keyboards
+from bot.middlewares.consent import ConsentMiddleware
+from bot.services.admins import AdminRegistry
+from bot.services.booking import (
     clean_client_name,
     clean_custom_time,
     is_menu_button_text,
     time_slot_text,
 )
-from bot.services.notifications import (  # noqa: E402
+from bot.services.notifications import (
     DeliveryReport,
     admin_recipients,
     deliver_new_booking,
     sync_peer_admins,
 )
-from bot.states import (  # noqa: E402
+from bot.states import (
     DATA_CLIENT_NAME,
     DATA_TARIFF_KEY,
     DATA_TIME_KEY,
@@ -166,6 +166,13 @@ class BotSpy:
     async def send_photo(self, **kwargs: Any) -> Any:
         self.calls.append(("SendPhoto", SimpleNamespace(**kwargs)))
         return self._sent_message(kwargs, with_photo=True)
+
+    async def send_document(self, **kwargs: Any) -> Any:
+        self.calls.append(("SendDocument", SimpleNamespace(**kwargs)))
+        return self._sent_message(kwargs)
+
+    async def get_me(self) -> Any:
+        return SimpleNamespace(id=999000, is_bot=True, username="nova_arena_demo_bot")
 
     async def get_chat(self, chat_id: int, **kwargs: Any) -> Any:
         """Профиль пользователя — нужен, если администратора нет в таблице users."""
@@ -1659,7 +1666,20 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
         "📋 Мои брони" in done_btns and "🏠 В меню" in done_btns,
     )
 
-    admin_photos = [p for n, p in bot.since(mark) if n == "SendPhoto"]
+    client_photos = [
+        p for n, p in bot.since(mark) if n == "SendPhoto" and p.chat_id == client_id
+    ]
+    check(
+        "Экран подтверждения заявки перенесён вниз под фото чека клиента",
+        len(client_photos) == 1
+        and any(
+            n == "DeleteMessage" and p.chat_id == client_id for n, p in bot.since(mark)
+        ),
+    )
+
+    admin_photos = [
+        p for n, p in bot.since(mark) if n == "SendPhoto" and p.chat_id == ADMIN_ID
+    ]
     check("Админу отправлено одно фото чека", len(admin_photos) == 1)
     admin_photo = admin_photos[0]
     check_equal(
@@ -1826,7 +1846,7 @@ async def test_full_scenario(db: Database, cfg: AppConfig, client_id: int) -> No
         (await db.get_booking(other_booking.id)).status,
         BookingStatus.REJECTED,
     )
-    rejected_text = text_of([p for n, p in bot.since(mark) if n == "SendMessage"][0])
+    rejected_text = text_of(next(p for n, p in bot.since(mark) if n == "SendMessage"))
     check(
         "При отклонении клиенту дан телефон клуба",
         cfg.club.admin_phone in rejected_text,
@@ -1918,14 +1938,24 @@ async def test_cancel_and_outdated(db: Database, cfg: AppConfig) -> None:
         == "🎮 Забронировать место",
     )
 
+    from bot.states import DATA_SCREEN_MESSAGE
+
+    first_cancel_mid = (await state.get_data()).get(DATA_SCREEN_MESSAGE)
     mark = bot.mark()
     await client_handlers.cmd_cancel(
         make_message(user_id=CANCEL_CLIENT_ID, bot=bot, text="/cancel"), state, db, cfg
     )
+    second_cancel_mid = (await state.get_data()).get(DATA_SCREEN_MESSAGE)
     check(
-        "/cancel без активного бронирования отвечает на том же экране",
+        "/cancel без активного бронирования переносит экран вниз и удаляет старый сверху",
         any(texts.BOOKING_NOT_STARTED in t for t in bot.step_texts(mark))
-        and any(n == "EditMessageMedia" for n, _ in bot.since(mark)),
+        and any(n == "SendPhoto" for n, _ in bot.since(mark))
+        and second_cancel_mid != first_cancel_mid
+        and any(
+            n == "DeleteMessage" and p.message_id == first_cancel_mid
+            for n, p in bot.since(mark)
+        )
+        and not any(n == "EditMessageMedia" for n, _ in bot.since(mark)),
     )
 
     await state.set_state(BookingFSM.choosing_time)
@@ -3916,6 +3946,89 @@ async def test_single_screen_hud(db: Database, dispatcher: Dispatcher) -> None:
         any("ГЛАВНОЕ МЕНЮ" in t for t in bot.step_texts(m)),
     )
 
+    # 5. Текстовые команды (/cancel, /privacy, /menu, /help, /admin, /admins)
+    # НИКОГДА не редактируют верхний экран над новыми сообщениями пользователя,
+    # а переносят интерфейс в самый низ чата и удаляют прежний экран бота сверху.
+    prev_mid = admin_mid
+    for cmd_text, expected_substr in (
+        ("/cancel", texts.BOOKING_NOT_STARTED),
+        ("/privacy", "152-ФЗ"),
+        ("/help", "Как пользоваться ботом"),
+        ("/admin", "АДМИН-ПАНЕЛЬ"),
+        ("/admins", "АДМИНИСТРАТОРЫ"),
+        ("/menu", "ГЛАВНОЕ МЕНЮ"),
+    ):
+        m = await send(
+            make_message(
+                user_id=ADMIN_ID,
+                bot=bot,
+                text=cmd_text,
+                username="hud_owner",
+                first_name="Владелец",
+                message_id=prev_mid + 1,
+            )
+        )
+        step_calls = bot.since(m)
+        sends = [p for n, p in step_calls if n == "SendPhoto"]
+        deletes = [p for n, p in step_calls if n == "DeleteMessage"]
+        edits = [p for n, p in step_calls if n == "EditMessageMedia"]
+        new_mid = bot._message_ids
+        check(
+            f"HUD: команда {cmd_text} переносит интерфейс вниз (SendPhoto + DeleteMessage старого экрана, 0 EditMessageMedia)",
+            len(sends) == 1
+            and new_mid > prev_mid
+            and any(p.message_id == prev_mid for p in deletes)
+            and len(edits) == 0
+            and any(expected_substr in t for t in bot.step_texts(m)),
+        )
+        prev_mid = new_mid
+
+    # Стек «Назад» сохраняется при команде /privacy: клик «⬅️ Назад» на новом
+    # нижнем экране редактирует уже это нижнее сообщение на месте.
+    m = await send(
+        make_message(
+            user_id=ADMIN_ID,
+            bot=bot,
+            text="/privacy",
+            username="hud_owner",
+            first_name="Владелец",
+            message_id=prev_mid + 1,
+        )
+    )
+    privacy_mid = bot._message_ids
+    m = await send(cb(nav(SCREEN_BACK), uid=ADMIN_ID, mid=privacy_mid))
+    back_edits = [p for n, p in bot.since(m) if n == "EditMessageMedia"]
+    check(
+        "HUD: после переноса /privacy кнопка «⬅️ Назад» редактирует новый нижний экран на месте",
+        len(back_edits) == 1
+        and back_edits[0].message_id == privacy_mid
+        and any("ГЛАВНОЕ МЕНЮ" in t for t in bot.step_texts(m)),
+    )
+
+    # Гость отправляет /admin через полный Dispatcher: получает отказ на новом
+    # нижнем экране без «осиротевшего» верхнего интерфейса и без текстового спама.
+    m = await send(
+        make_message(
+            user_id=guest_id,
+            bot=bot,
+            text="/admin",
+            username="hud_guest",
+            first_name="Игрок",
+            message_id=screen_msg_id + 50,
+        )
+    )
+    guest_admin_calls = bot.since(m)
+    check(
+        "HUD: /admin от гостя переносит экран вниз с пояснением и удаляет старый экран сверху",
+        len([p for n, p in guest_admin_calls if n == "SendPhoto"]) == 1
+        and len([p for n, p in guest_admin_calls if n == "SendMessage"]) == 0
+        and any(
+            n == "DeleteMessage" and p.message_id == screen_msg_id
+            for n, p in guest_admin_calls
+        )
+        and any("только для администраторов" in t for t in bot.step_texts(m)),
+    )
+
 
 # --------------------------------------------------------------------------- #
 # 12. Обновление базы, созданной предыдущей версией бота
@@ -4128,9 +4241,7 @@ async def test_graphical_cards(db: Database, cfg: AppConfig) -> None:
 
     tariff_view = await render_screen(ctx, Screen.BOOK_TARIFF, "")
     tariff_btns = [
-        b
-        for row in tariff_view.reply_markup.inline_keyboard[:2]
-        for b in row
+        b for row in tariff_view.reply_markup.inline_keyboard[:2] for b in row
     ]
     tariff_badges = {b.text.split()[0] for b in tariff_btns}
     check(
@@ -4330,9 +4441,910 @@ async def test_graphical_cards(db: Database, cfg: AppConfig) -> None:
             )
     hd_pic_file = ASSETS_DIR / "description_pic_hd.png"
     with Image.open(hd_pic_file) as hd_img:
-        check("HD-версия Description Picture имеет размер 1280×720", hd_img.size == (1280, 720))
+        check(
+            "HD-версия Description Picture имеет размер 1280×720",
+            hd_img.size == (1280, 720),
+        )
 
     await state.storage.close()
+
+
+# --------------------------------------------------------------------------- #
+# Полный цикл расширенной админ-панели (все 9 модулей + палитра 60–30–10)
+# --------------------------------------------------------------------------- #
+async def test_admin_9_modules() -> None:
+    import io
+    from datetime import datetime as _dt
+
+    from PIL import Image
+
+    from bot.db.models import RejectReason
+    from bot.handlers import admin_manage as adm_manage
+    from bot.palette import audit_keyboard_harmony
+    from bot.services.notifications import is_in_quiet_hours
+    from bot.services.schedule import check_slot_availability
+    from bot.ui.render import CAPTION_LIMIT, ViewContext, render_screen
+    from bot.ui.screens import Screen, ScreenCB
+    from bot.utils.formatting import visible_length
+
+    print("\n— Расширенная админ-панель (блоки 1–9) —")
+
+    workdir = Path(tempfile.mkdtemp(prefix="nova-adm9-"))
+    db_path = workdir / "adm9.db"
+    cfg = make_cfg(db_path)
+    db: Database | None = None
+    bot = BotSpy()
+
+    owner_id = ADMIN_ID
+    branch2_admin_id = 777002
+    viewer_id = 777003
+    guest_id = 888101
+    guest2_id = 888102
+
+    owner_state = make_fsm_context(owner_id)
+    branch2_state = make_fsm_context(branch2_admin_id)
+    viewer_state = make_fsm_context(viewer_id)
+    guest_state = make_fsm_context(guest_id)
+    guest2_state = make_fsm_context(guest2_id)
+
+    try:
+        db = await init_database(db_path, TEST_TZ)
+        admins = AdminRegistry(db, cfg)
+        await admins.startup()
+        await db.upsert_user(guest_id, "cyber_guest", "Алексей")
+        await db.set_consent(guest_id, True)
+        await db.upsert_user(guest2_id, "pdf_guest", "Мария")
+        await db.set_consent(guest2_id, True)
+
+        # --- Модуль 5 и 1: Бронь с гостями, доп. опциями, комментарием и PDF-чеком --- #
+        await client_handlers.cb_navigate(
+            make_callback(
+                ScreenCB(screen=Screen.BOOK_TARIFF).pack(), user_id=guest_id, bot=bot
+            ),
+            ScreenCB(screen=Screen.BOOK_TARIFF),
+            guest_state,
+            db,
+            cfg,
+            admins,
+        )
+        await client_handlers.cb_choose_tariff(
+            make_callback("bk:t:vip", user_id=guest_id, bot=bot),
+            guest_state,
+            db,
+            cfg,
+            admins,
+        )
+        await client_handlers.cb_choose_time(
+            make_callback("bk:w:other", user_id=guest_id, bot=bot),
+            guest_state,
+            db,
+            cfg,
+            admins,
+        )
+        await client_handlers.msg_enter_custom_time(
+            make_message(text="18:00-21:00 на 3 часа", user_id=guest_id, bot=bot),
+            guest_state,
+            db,
+            cfg,
+            admins,
+        )
+        # Выбираем 2 гостей и доп. услугу «Напиток» (+180 ₽)
+        await client_handlers.cb_choose_guests(
+            make_callback("bk:g:2", user_id=guest_id, bot=bot),
+            guest_state,
+            db,
+            cfg,
+            admins,
+        )
+        await client_handlers.cb_toggle_extra(
+            make_callback("bk:ex:drink", user_id=guest_id, bot=bot),
+            guest_state,
+            db,
+            cfg,
+            admins,
+        )
+        mark = bot.mark()
+        await client_handlers.msg_enter_name(
+            make_message(
+                text="Алексей // свой коврик, тихий угол", user_id=guest_id, bot=bot
+            ),
+            guest_state,
+            db,
+            cfg,
+            admins,
+        )
+        pay_screen_txt = "\n".join(bot.step_texts(mark))
+        check(
+            "Модуль 5: гость видит итоговую цену с опциями ДО подтверждения",
+            "Напиток" in pay_screen_txt
+            and "₽" in pay_screen_txt
+            and "Гостей: <b>2</b>" in pay_screen_txt,
+        )
+
+        # Выбираем оплату чеком и отправляем PDF-документ!
+        await client_handlers.cb_choose_payment(
+            make_callback(inline_keyboards.CB_PAY_CHECK, user_id=guest_id, bot=bot),
+            guest_state,
+            db,
+            cfg,
+            admins,
+        )
+        from aiogram.types import Document
+
+        pdf_msg = make_message(text="", user_id=guest_id, bot=bot).model_copy(
+            update={
+                "document": Document(
+                    file_id="pdf_receipt_file_001",
+                    file_unique_id="uniq_pdf_001",
+                    file_name="sbp_check.pdf",
+                    mime_type="application/pdf",
+                )
+            }
+        )
+        mark = bot.mark()
+        await client_handlers.msg_receive_pdf_receipt(
+            pdf_msg, guest_state, db, cfg, admins
+        )
+        check(
+            "Модуль 1/8: PDF-чек принят и ушёл админу через send_document",
+            any(name == "SendDocument" for name, _ in bot.since(mark)),
+        )
+        b_list = await db.list_user_bookings(guest_id)
+        b1 = b_list[0]
+        check_equal("Модуль 1: в брони сохранено кол-во гостей = 2", b1.guests_count, 2)
+        check(
+            "Модуль 1: в брони сохранён комментарий гостя",
+            "тихий угол" in (b1.guest_comment or ""),
+        )
+        check_equal(
+            "Модуль 1: тип чека сохранён как document", b1.receipt_kind, "document"
+        )
+        check("Модуль 5: итоговая цена сохранена в БД", (b1.quoted_price or 0) >= 1000)
+
+        # Открываем чек PDF в 1 тап из карточки брони
+        mark = bot.mark()
+        await adm_manage.cb_open_receipt(
+            make_callback(f"ad:rcpt:{b1.id}", user_id=owner_id, bot=bot),
+            db,
+            bot,
+        )
+        check(
+            "Модуль 1: кнопка «Открыть чек» отправляет PDF в 1 тап",
+            any(
+                name == "SendDocument" and p.chat_id == owner_id
+                for name, p in bot.since(mark)
+            ),
+        )
+
+        # --- Модуль 2: Подтверждение, Изменение и Отмена после подтверждения --- #
+        mark = bot.mark()
+        await admin_handlers.cb_decision(
+            make_callback(
+                inline_keyboards.admin_approve_callback(b1.id),
+                user_id=owner_id,
+                bot=bot,
+            ),
+            owner_state,
+            db,
+            bot,
+            cfg,
+            admins,
+        )
+        approve_msg = "\n".join(
+            text_of(p)
+            for n, p in bot.since(mark)
+            if n == "SendMessage" and p.chat_id == guest_id
+        )
+        check(
+            "Модуль 2: при подтверждении гость получает «Готово, ждём в ...» и адрес",
+            "Готово, ждём в" in approve_msg and cfg.club.address in approve_msg,
+        )
+
+        # Изменяем номер ПК и количество гостей → гость получает «бронь изменена»
+        await adm_manage.cb_edit_booking_action(
+            make_callback(f"ad:ed:{b1.id}:seat", user_id=owner_id, bot=bot),
+            owner_state,
+            db,
+            bot,
+            cfg,
+            admins,
+        )
+        mark = bot.mark()
+        await adm_manage.msg_edit_booking_field(
+            make_message(text="VIP ПК #3", user_id=owner_id, bot=bot),
+            owner_state,
+            db,
+            bot,
+            cfg,
+            admins,
+        )
+        mod_msg = "\n".join(
+            text_of(p)
+            for n, p in bot.since(mark)
+            if n == "SendMessage" and p.chat_id == guest_id
+        )
+        check(
+            "Модуль 2: при изменении ПК гость уведомлён («изменена администратором»)",
+            "изменена администратором" in mod_msg and "VIP ПК #3" in mod_msg,
+        )
+
+        # Отменяем уже подтверждённую бронь с причиной + комментарием → гость получает предложение переноса
+        await adm_manage.cb_choose_cancel_reason(
+            make_callback(
+                f"ad:can:{b1.id}:{RejectReason.NO_SEATS}", user_id=owner_id, bot=bot
+            ),
+            owner_state,
+            db,
+            cfg,
+            admins,
+        )
+        mark = bot.mark()
+        await adm_manage.msg_cancel_comment(
+            make_message(
+                text="Плановое обновление видеокарт в VIP", user_id=owner_id, bot=bot
+            ),
+            owner_state,
+            db,
+            bot,
+            cfg,
+            admins,
+        )
+        cancel_msg = "\n".join(
+            text_of(p)
+            for n, p in bot.since(mark)
+            if n == "SendMessage" and p.chat_id == guest_id
+        )
+        b1_after = await db.get_booking(b1.id)
+        check(
+            "Модуль 2: подтверждённая бронь отменена с сохранением флага was_approved",
+            b1_after.status == BookingStatus.REJECTED and b1_after.was_approved,
+        )
+        check(
+            "Модуль 2: при отмене после подтверждения гостю предложены свободные окна переноса",
+            "отменена" in cancel_msg and "перенести визит" in cancel_msg,
+        )
+
+        # Отклонение новой заявки с причиной и комментарием → альтернативные слоты («есть ... или ...»)
+        b2 = await db.add_booking(
+            user_id=guest2_id,
+            tariff="Standart",
+            time_slot="20:00–22:00",
+            client_name="Мария",
+            receipt_file_id=None,
+            slot_start="20:00",
+            slot_end="22:00",
+        )
+        await adm_manage.cb_choose_reject_reason(
+            make_callback(
+                f"ad:rej:{b2.id}:{RejectReason.UNPAID}", user_id=owner_id, bot=bot
+            ),
+            owner_state,
+            db,
+            cfg,
+            admins,
+        )
+        mark = bot.mark()
+        await adm_manage.msg_reject_comment(
+            make_message(text="Не поступил перевод СБП", user_id=owner_id, bot=bot),
+            owner_state,
+            db,
+            bot,
+            cfg,
+            admins,
+        )
+        rej_msg = "\n".join(
+            text_of(p)
+            for n, p in bot.since(mark)
+            if n == "SendMessage" and p.chat_id == guest2_id
+        )
+        check(
+            "Модуль 2: при отклонении гостю уходит причина, комментарий и альтернативные слоты",
+            "гость не оплатил" in rej_msg
+            and "Не поступил перевод СБП" in rej_msg
+            and "или" in rej_msg,
+        )
+
+        # --- Модуль 3: Ручное создание брони за гостя + отдельная строка статистики --- #
+        await adm_manage.cb_manual_booking(
+            make_callback("ad:man:start", user_id=owner_id, bot=bot),
+            owner_state,
+            db,
+            cfg,
+            admins,
+        )
+        await adm_manage.cb_manual_booking(
+            make_callback("ad:man:tf:svip", user_id=owner_id, bot=bot),
+            owner_state,
+            db,
+            cfg,
+            admins,
+        )
+        await adm_manage.cb_manual_booking(
+            make_callback("ad:man:tm:18_21", user_id=owner_id, bot=bot),
+            owner_state,
+            db,
+            cfg,
+            admins,
+        )
+        await adm_manage.cb_manual_booking(
+            make_callback("ad:man:g:3", user_id=owner_id, bot=bot),
+            owner_state,
+            db,
+            cfg,
+            admins,
+        )
+        await adm_manage.msg_manual_guest(
+            make_message(
+                text="Дмитрий | +7 900 555-11-22 | S-VIP #2", user_id=owner_id, bot=bot
+            ),
+            owner_state,
+            db,
+            bot,
+            cfg,
+            admins,
+        )
+        stats_after_manual = await db.get_stats()
+        check_equal(
+            "Модуль 3: ручная бронь считается в stats.manual",
+            stats_after_manual.manual,
+            1,
+        )
+
+        # --- Модуль 4: Расписание, шаг 30м, буфер уборки, праздник и занятый слот Sheets/IZI --- #
+        await adm_manage.cb_schedule_action(
+            make_callback("ad:sch:step:30", user_id=owner_id, bot=bot),
+            owner_state,
+            db,
+            cfg,
+            admins,
+        )
+        await adm_manage.cb_schedule_action(
+            make_callback("ad:sch:buf:15", user_id=owner_id, bot=bot),
+            owner_state,
+            db,
+            cfg,
+            admins,
+        )
+        await adm_manage.cb_schedule_action(
+            make_callback("ad:sch:max", user_id=owner_id, bot=bot),
+            owner_state,
+            db,
+            cfg,
+            admins,
+        )
+        await adm_manage.msg_schedule_edit(
+            make_message(text="10", user_id=owner_id, bot=bot),
+            owner_state,
+            db,
+            bot,
+            cfg,
+            admins,
+        )
+        # Блокируем 15:00-17:00 на все 10 мест из IZI
+        await adm_manage.cb_schedule_action(
+            make_callback("ad:sch:busy", user_id=owner_id, bot=bot),
+            owner_state,
+            db,
+            cfg,
+            admins,
+        )
+        await adm_manage.msg_schedule_edit(
+            make_message(text="15:00-17:00 10 IZI", user_id=owner_id, bot=bot),
+            owner_state,
+            db,
+            bot,
+            cfg,
+            admins,
+        )
+        busy_check = await check_slot_availability(
+            db,
+            iso_date=db.today_iso(),
+            start_hhmm="15:30",
+            end_hhmm="16:30",
+            guests_count=1,
+        )
+        check(
+            "Модуль 4: занятый слот IZI блокируется",
+            not busy_check.available and len(busy_check.alternatives) >= 1,
+        )
+        buffer_check = await check_slot_availability(
+            db,
+            iso_date=db.today_iso(),
+            start_hhmm="17:05",
+            end_hhmm="18:05",
+            guests_count=1,
+        )
+        check(
+            "Модуль 4: 15-минутный буфер на уборку блокирует впритык следующий слот (17:05)",
+            not buffer_check.available,
+        )
+
+        # Праздничный выходной день блокирует запись целиком
+        await adm_manage.cb_schedule_action(
+            make_callback("ad:sch:hol", user_id=owner_id, bot=bot),
+            owner_state,
+            db,
+            cfg,
+            admins,
+        )
+        await adm_manage.msg_schedule_edit(
+            make_message(
+                text="2027-01-01 выходной Новый год", user_id=owner_id, bot=bot
+            ),
+            owner_state,
+            db,
+            bot,
+            cfg,
+            admins,
+        )
+        hol_check = await check_slot_availability(
+            db,
+            iso_date="2027-01-01",
+            start_hhmm="14:00",
+            end_hhmm="16:00",
+            guests_count=1,
+        )
+        check(
+            "Модуль 4: закрытый праздничный день блокирует запись",
+            not hol_check.available,
+        )
+
+        # --- Модуль 5: Редактирование тарифов и доп. услуг владельцем --- #
+        await adm_manage.cb_tariff_admin(
+            make_callback("ad:tf:ed:standart:wd", user_id=owner_id, bot=bot),
+            owner_state,
+            db,
+            cfg,
+            admins,
+        )
+        await adm_manage.msg_tariff_edit(
+            make_message(text="130 340 530 590", user_id=owner_id, bot=bot),
+            owner_state,
+            db,
+            bot,
+            cfg,
+            admins,
+        )
+        tf_std = await db.get_tariff_record("standart")
+        check_equal("Модуль 5: цена будней Standart обновлена в БД", tf_std.hour1, 130)
+
+        await adm_manage.cb_tariff_admin(
+            make_callback("ad:tf:ext:add", user_id=owner_id, bot=bot),
+            owner_state,
+            db,
+            cfg,
+            admins,
+        )
+        await adm_manage.msg_tariff_edit(
+            make_message(text="Снек-сет | 290 | 🍕", user_id=owner_id, bot=bot),
+            owner_state,
+            db,
+            bot,
+            cfg,
+            admins,
+        )
+        check(
+            "Модуль 5: новая доп. услуга добавлена",
+            any(
+                e.title == "Снек-сет" and e.price == 290
+                for e in await db.list_tariff_extras()
+            ),
+        )
+
+        # --- Модуль 6: Сеть из 2+ точек + разграничение точек между админами --- #
+        await adm_manage.cb_branch_admin(
+            make_callback("ad:br:add", user_id=owner_id, bot=bot),
+            owner_state,
+            db,
+            cfg,
+            admins,
+        )
+        await adm_manage.msg_branch_edit(
+            make_message(
+                text="NOVA ARENA Север | Неоград | пр-т Космонавтов, 18 | 24/7 | +7 (900) 000-22-33",
+                user_id=owner_id,
+                bot=bot,
+            ),
+            owner_state,
+            db,
+            bot,
+            cfg,
+            admins,
+        )
+        check_equal(
+            "Модуль 6: в сети стало 2 активные точки",
+            await db.count_active_branches(),
+            2,
+        )
+
+        # Теперь гость при старте бронирования попадает на шаг 0 — выбор точки!
+        await client_handlers.cb_navigate(
+            make_callback(
+                ScreenCB(screen=Screen.BOOK_TARIFF).pack(), user_id=guest_id, bot=bot
+            ),
+            ScreenCB(screen=Screen.BOOK_TARIFF),
+            guest_state,
+            db,
+            cfg,
+            admins,
+        )
+        check_equal(
+            "Модуль 6: при 2+ точках бот спрашивает точку первым шагом",
+            await guest_state.get_state(),
+            "BookingFSM:choosing_branch",
+        )
+
+        # --- Модуль 7: Админы по «Имя + ID», инвайт-ссылка, роли owner/admin/viewer, передача точки --- #
+        await admin_handlers.cb_admin_add_start(
+            make_callback(inline_keyboards.CB_ADMIN_ADD, user_id=owner_id, bot=bot),
+            owner_state,
+            db,
+            cfg,
+            admins,
+        )
+        await admin_handlers.msg_admin_id(
+            make_message(text=f"Максим {branch2_admin_id}", user_id=owner_id, bot=bot),
+            owner_state,
+            db,
+            bot,
+            cfg,
+            admins,
+        )
+        adm_b2 = await db.get_admin(branch2_admin_id)
+        check(
+            "Модуль 7: админ добавлен по формату «Имя + ID»",
+            adm_b2 is not None and adm_b2.display_name == "Максим",
+        )
+        # Привязываем Максима к точке #2
+        await adm_manage.cb_assign_admin_branch(
+            make_callback(
+                f"ad:admin:br:2:{branch2_admin_id}", user_id=owner_id, bot=bot
+            ),
+            owner_state,
+            db,
+            cfg,
+            admins,
+        )
+        # Проверяем, что админ точки #2 НЕ может подтвердить бронь точки #1
+        b_br1 = await db.add_booking(
+            user_id=guest_id,
+            tariff="Standart",
+            time_slot="21:00–23:00",
+            client_name="Алексей",
+            receipt_file_id=None,
+            branch_id=1,
+        )
+        mark = bot.mark()
+        await admin_handlers.cb_decision(
+            make_callback(
+                inline_keyboards.admin_approve_callback(b_br1.id),
+                user_id=branch2_admin_id,
+                bot=bot,
+            ),
+            branch2_state,
+            db,
+            bot,
+            cfg,
+            admins,
+        )
+        check_equal(
+            "Модуль 6/7: админ точки #2 не может подтвердить чужую бронь точки #1",
+            (await db.get_booking(b_br1.id)).status,
+            BookingStatus.PENDING,
+        )
+
+        # Генерируем инвайт-ссылку для роли viewer и активируем её через /start adm_<token>!
+        mark = bot.mark()
+        await adm_manage.cb_generate_invite(
+            make_callback("ad:admin:inv:viewer", user_id=owner_id, bot=bot),
+            owner_state,
+            db,
+            bot,
+            cfg,
+            admins,
+        )
+        inv_screen_txt = "\n".join(bot.step_texts(mark))
+        import re as _re
+
+        token_m = _re.search(r"start=adm_([A-Za-z0-9_-]+)", inv_screen_txt)
+        check("Модуль 7: сгенерирована одноразовая инвайт-ссылка", token_m is not None)
+        inv_token = token_m.group(1)
+
+        await client_handlers.cmd_start(
+            make_message(
+                text=f"/start adm_{inv_token}",
+                user_id=viewer_id,
+                username="club_viewer",
+                bot=bot,
+            ),
+            viewer_state,
+            db,
+            cfg,
+            admins,
+        )
+        viewer_rec = await db.get_admin(viewer_id)
+        check(
+            "Модуль 7: переход по инвайт-ссылке активировал роль viewer",
+            viewer_rec is not None and viewer_rec.is_viewer and not viewer_rec.can_act,
+        )
+
+        # Viewer пытается подтвердить бронь → блокируется alert'ом, бронь остаётся pending!
+        mark = bot.mark()
+        await admin_handlers.cb_decision(
+            make_callback(
+                inline_keyboards.admin_approve_callback(b_br1.id),
+                user_id=viewer_id,
+                bot=bot,
+            ),
+            viewer_state,
+            db,
+            bot,
+            cfg,
+            admins,
+        )
+        check_equal(
+            "Модуль 7: роль viewer не может менять статус брони (строгий read-only)",
+            (await db.get_booking(b_br1.id)).status,
+            BookingStatus.PENDING,
+        )
+
+        # Передача точки от Максима к другому оператору + деактивация с сохранением истории
+        operator3_id = 777004
+        await db.add_admin(operator3_id, role=AdminRole.OPERATOR, display_name="Илья")
+        admins.remember(operator3_id)
+        await adm_manage.cb_handover_branch(
+            make_callback(
+                f"ad:admin:ho:{branch2_admin_id}:{operator3_id}",
+                user_id=owner_id,
+                bot=bot,
+            ),
+            owner_state,
+            db,
+            cfg,
+            admins,
+        )
+        check_equal(
+            "Модуль 7: точка передана новому администратору смены",
+            (await db.get_admin(operator3_id)).branch_id,
+            2,
+        )
+        await admin_handlers.cb_admin_toggle(
+            make_callback(
+                inline_keyboards.admin_toggle_callback(branch2_admin_id),
+                user_id=owner_id,
+                bot=bot,
+            ),
+            owner_state,
+            db,
+            bot,
+            cfg,
+            admins,
+        )
+        check(
+            "Модуль 7: деактивированный админ остаётся в БД для истории, но теряет доступ",
+            not (await db.get_admin(branch2_admin_id)).is_active
+            and not await admins.is_admin(branch2_admin_id),
+        )
+
+        # --- Модуль 8: Тихие часы и пуши (отмена гостем + неявка) --- #
+        await adm_manage.cb_admin_notify_prefs(
+            make_callback("ad:ntf:q:23_08", user_id=owner_id, bot=bot),
+            owner_state,
+            db,
+            cfg,
+            admins,
+        )
+        adm_quiet = await db.get_admin(owner_id)
+        check(
+            "Модуль 8: тихие часы 23:00–08:00 блокируют ночной пуш в 02:30",
+            is_in_quiet_hours(adm_quiet, _dt(2026, 10, 26, 2, 30, tzinfo=TEST_TZ)),
+        )
+        check(
+            "Модуль 8: тихие часы 23:00–08:00 пропускают дневной пуш в 15:00",
+            not is_in_quiet_hours(adm_quiet, _dt(2026, 10, 26, 15, 0, tzinfo=TEST_TZ)),
+        )
+        await adm_manage.cb_admin_notify_prefs(
+            make_callback("ad:ntf:q:off", user_id=owner_id, bot=bot),
+            owner_state,
+            db,
+            cfg,
+            admins,
+        )
+
+        # Гость сам отменяет свою бронь b_br1 → владельцу уходит пуш об отмене гостем!
+        mark = bot.mark()
+        await client_handlers.cb_client_self_cancel(
+            make_callback(f"cli:cancel:{b_br1.id}", user_id=guest_id, bot=bot),
+            guest_state,
+            db,
+            cfg,
+            admins,
+        )
+        cancel_pushes = [
+            text_of(p)
+            for n, p in bot.since(mark)
+            if n == "SendMessage"
+            and p.chat_id == owner_id
+            and "ГОСТЬ ОТМЕНИЛ БРОНЬ" in text_of(p)
+        ]
+        check(
+            "Модуль 8: при отмене брони гостем админу приходит пуш",
+            len(cancel_pushes) >= 1,
+        )
+
+        # Отметка «гость не пришёл» шлёт пуш коллегам с включённым notify_noshow
+        b_ns = await db.add_booking(
+            user_id=guest_id,
+            tariff="VIP",
+            time_slot="19:00–21:00",
+            client_name="Алексей",
+            receipt_file_id=None,
+            status=BookingStatus.APPROVED,
+            branch_id=2,
+        )
+        mark = bot.mark()
+        await adm_manage.cb_mark_noshow(
+            make_callback(f"ad:noshow:{b_ns.id}", user_id=operator3_id, bot=bot),
+            owner_state,
+            db,
+            bot,
+            cfg,
+            admins,
+        )
+        noshow_pushes = [
+            text_of(p)
+            for n, p in bot.since(mark)
+            if n == "SendMessage"
+            and p.chat_id == owner_id
+            and "НЕЯВКА ГОСТЯ" in text_of(p)
+        ]
+        check(
+            "Модуль 8: при отметке «гость не пришёл» владельцу приходит пуш",
+            len(noshow_pushes) >= 1,
+        )
+
+        # --- Модуль 9: Настройки клуба (название, чат, приветствие, фото реквизитов, правила) --- #
+        await adm_manage.cb_club_settings(
+            make_callback("ad:set:ed:chat_url", user_id=owner_id, bot=bot),
+            owner_state,
+            db,
+            cfg,
+            admins,
+        )
+        await adm_manage.msg_setting_text(
+            make_message(
+                text="https://t.me/nova_arena_demo_chat", user_id=owner_id, bot=bot
+            ),
+            owner_state,
+            db,
+            bot,
+            cfg,
+            admins,
+        )
+        await adm_manage.cb_club_settings(
+            make_callback("ad:set:ed:welcome", user_id=owner_id, bot=bot),
+            owner_state,
+            db,
+            cfg,
+            admins,
+        )
+        await adm_manage.msg_setting_text(
+            make_message(
+                text="Добро пожаловать в кибер-пространство будущего!",
+                user_id=owner_id,
+                bot=bot,
+            ),
+            owner_state,
+            db,
+            bot,
+            cfg,
+            admins,
+        )
+        await adm_manage.cb_club_settings(
+            make_callback("ad:set:ed:payment", user_id=owner_id, bot=bot),
+            owner_state,
+            db,
+            cfg,
+            admins,
+        )
+        qr_msg = make_message(
+            text="",
+            user_id=owner_id,
+            bot=bot,
+            with_photo=True,
+            caption="СБП +7 (900) 777-88-99",
+        )
+        await adm_manage.msg_setting_payment_photo(qr_msg, owner_state, db, cfg, admins)
+        check(
+            "Модуль 9: фото/QR реквизитов сохранено в club_settings",
+            bool(await db.get_setting("payment_photo_file_id")),
+        )
+
+        # --- Проверка рендеринга и гармонии палитры 60–30–10 ВСЕХ новых экранов --- #
+        b_pending_card = await db.add_booking(
+            user_id=guest_id,
+            tariff="Standart",
+            time_slot="20:00–22:00",
+            client_name="Алексей",
+            receipt_file_id="sample_photo_id",
+        )
+        b_approved_card = await db.add_booking(
+            user_id=guest_id,
+            tariff="VIP",
+            time_slot="21:00–23:00",
+            client_name="Алексей",
+            receipt_file_id="sample_photo_id",
+            status=BookingStatus.APPROVED,
+        )
+        ctx = ViewContext(
+            db=db,
+            cfg=cfg,
+            bot=bot,
+            user_id=owner_id,
+            state=owner_state,
+            admins=admins,
+        )
+        new_screens: list[tuple[str, str, bool]] = [
+            (Screen.MENU, "", False),
+            (Screen.CONTACTS, "", False),
+            (Screen.BOOKINGS, "", False),
+            (Screen.BOOK_BRANCH, "", False),
+            (Screen.BOOK_NAME, "", False),
+            (Screen.BOOK_PAY, "", False),
+            (Screen.ADMIN, "", False),
+            (Screen.ADMIN_PENDING, "0", True),
+            (Screen.ADMIN_APPROVED, "0", False),
+            (Screen.ADMIN_REJECTED, "0", False),
+            (Screen.ADMIN_BOOKING, str(b_pending_card.id), False),
+            (Screen.ADMIN_BOOKING, str(b_approved_card.id), False),
+            (Screen.ADMIN_BOOKING_REJECT, str(b_pending_card.id), False),
+            (Screen.ADMIN_BOOKING_CANCEL, str(b_approved_card.id), False),
+            (Screen.ADMIN_BOOKING_EDIT, str(b_approved_card.id), False),
+            (Screen.ADMIN_MANUAL, "", False),
+            (Screen.ADMIN_SCHEDULE, "", False),
+            (Screen.ADMIN_TARIFFS, "", False),
+            (Screen.ADMIN_TARIFF_ITEM, "standart", False),
+            (Screen.ADMIN_BRANCHES, "", False),
+            (Screen.ADMIN_BRANCH_ITEM, "1", False),
+            (Screen.ADMIN_ADMINS, "", False),
+            (Screen.ADMIN_ADMIN, str(operator3_id), False),
+            (Screen.ADMIN_HANDOVER, str(operator3_id), False),
+            (Screen.ADMIN_NOTIFY, "", False),
+            (Screen.ADMIN_SETTINGS, "", False),
+        ]
+        for scr, arg, batch_ok in new_screens:
+            view = await render_screen(ctx, scr, arg)
+            with Image.open(io.BytesIO(view.card.jpeg_bytes)) as img:
+                is_hd = img.size == (1280, 720)
+            tag = f"{scr}:{arg}" if arg else scr
+            vis_len = visible_length(view.caption)
+            check(
+                f"Новый экран [{tag}]: 1280×720, без <pre>, подпись {vis_len} ≤ {CAPTION_LIMIT}",
+                is_hd and "<pre>" not in view.caption and 0 < vis_len <= CAPTION_LIMIT,
+                f"vis_len={vis_len}",
+            )
+            harmony = audit_keyboard_harmony(
+                view.reply_markup, allow_batch_decisions=batch_ok
+            )
+            check(
+                f"Гармония палитры [{tag}] (эмодзи + 60–30–10 + ≤64B callback)",
+                harmony.ok
+                and all(
+                    len((b.callback_data or "").encode("utf-8")) <= 64
+                    for row in view.reply_markup.inline_keyboard
+                    for b in row
+                ),
+                "; ".join(harmony.issues),
+            )
+    finally:
+        await owner_state.storage.close()
+        await branch2_state.storage.close()
+        await viewer_state.storage.close()
+        await guest_state.storage.close()
+        await guest2_state.storage.close()
+        if db is not None:
+            await db.close()
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -4378,6 +5390,7 @@ async def run_all() -> int:
         await test_payment_choice(db, cfg)
         await test_graphical_cards(db, cfg)
         await test_migration()
+        await test_admin_9_modules()
     finally:
         await db.close()
         shutil.rmtree(workdir, ignore_errors=True)

@@ -61,6 +61,8 @@ class Screen:
     #: Брони текущего клиента.
     BOOKINGS: Final[str] = "bookings"
 
+    #: Бронирование, шаг 0 — выбор точки сети (если точек >= 2).
+    BOOK_BRANCH: Final[str] = "book_branch"
     #: Бронирование, шаг 1 — выбор зала.
     BOOK_TARIFF: Final[str] = "book_tariff"
     #: Бронирование, шаг 2 — выбор времени.
@@ -76,16 +78,46 @@ class Screen:
     #: Заявка принята (в ``arg`` — номер заявки).
     BOOK_DONE: Final[str] = "book_done"
 
-    #: Админ-панель: сводка.
+    #: Админ-панель: главный экран и очередь броней.
     ADMIN: Final[str] = "admin"
-    #: Активные брони (в ``arg`` — номер страницы).
+    #: Очередь новых броней (в ``arg`` — номер страницы).
     ADMIN_PENDING: Final[str] = "admin_pending"
+    #: Подтверждённые сегодня брони (в ``arg`` — номер страницы).
+    ADMIN_APPROVED: Final[str] = "admin_approved"
+    #: Отклонённые / отменённые сегодня брони (в ``arg`` — номер страницы).
+    ADMIN_REJECTED: Final[str] = "admin_rejected"
+    #: Детальная карточка конкретной брони (в ``arg`` — ID брони).
+    ADMIN_BOOKING: Final[str] = "admin_booking"
+    #: Выбор причины отклонения брони (в ``arg`` — ID брони).
+    ADMIN_BOOKING_REJECT: Final[str] = "admin_bk_rej"
+    #: Выбор причины отмены подтверждённой брони (в ``arg`` — ID брони).
+    ADMIN_BOOKING_CANCEL: Final[str] = "admin_bk_can"
+    #: Изменение параметров брони: время, гости, ПК (в ``arg`` — ID брони).
+    ADMIN_BOOKING_EDIT: Final[str] = "admin_bk_edit"
+    #: Мастер ручного создания брони за гостя.
+    ADMIN_MANUAL: Final[str] = "admin_manual"
+    #: Расписание работы, слоты, буфер и занятость.
+    ADMIN_SCHEDULE: Final[str] = "admin_schedule"
+    #: Тарифы (будни/выходные) и доп. услуги.
+    ADMIN_TARIFFS: Final[str] = "admin_tariffs"
+    #: Карточка настройки тарифа зала (в ``arg`` — ключ зала).
+    ADMIN_TARIFF_ITEM: Final[str] = "admin_tariff"
+    #: Точки сети клубов.
+    ADMIN_BRANCHES: Final[str] = "admin_branches"
+    #: Карточка конкретной точки сети (в ``arg`` — ID точки).
+    ADMIN_BRANCH_ITEM: Final[str] = "admin_branch"
     #: Список администраторов.
     ADMIN_ADMINS: Final[str] = "admin_admins"
     #: Карточка администратора (в ``arg`` — Telegram ID).
     ADMIN_ADMIN: Final[str] = "admin_admin"
-    #: Добавление администратора (ввод ID).
+    #: Добавление администратора (Имя + ID или инвайт-ссылка).
     ADMIN_ADD: Final[str] = "admin_add"
+    #: Передача точки другому администратору (в ``arg`` — user_id сдающего).
+    ADMIN_HANDOVER: Final[str] = "admin_handover"
+    #: Настройки пуш-уведомлений и «тихих часов» текущего админа.
+    ADMIN_NOTIFY: Final[str] = "admin_notify"
+    #: Настройки клуба: название, чат, реквизиты, приветствие, правила брони.
+    ADMIN_SETTINGS: Final[str] = "admin_settings"
 
     #: Персональные данные (152-ФЗ) и отзыв согласия.
     PRIVACY: Final[str] = "privacy"
@@ -106,6 +138,7 @@ SCREEN_TITLES: Final[dict[str, str]] = {
     Screen.FAQ_ITEM: "ЧАСТЫЕ ВОПРОСЫ",
     Screen.CONTACTS: "КОНТАКТЫ И ОПЛАТА",
     Screen.BOOKINGS: "МОИ БРОНИ",
+    Screen.BOOK_BRANCH: "БРОНЬ · ВЫБОР ТОЧКИ",
     Screen.BOOK_TARIFF: "БРОНЬ · ШАГ 1/4 · ЗАЛ",
     Screen.BOOK_TIME: "БРОНЬ · ШАГ 2/4 · ВРЕМЯ",
     Screen.BOOK_TIME_TEXT: "БРОНЬ · ШАГ 2/4 · ВРЕМЯ",
@@ -113,11 +146,26 @@ SCREEN_TITLES: Final[dict[str, str]] = {
     Screen.BOOK_PAY: "БРОНЬ · ШАГ 4/4 · ОПЛАТА",
     Screen.BOOK_RECEIPT: "БРОНЬ · ШАГ 4/4 · ЧЕК",
     Screen.BOOK_DONE: "ЗАЯВКА ОТПРАВЛЕНА",
-    Screen.ADMIN: "АДМИН-ПАНЕЛЬ",
-    Screen.ADMIN_PENDING: "АКТИВНЫЕ БРОНИ",
+    Screen.ADMIN: "АДМИН-ПАНЕЛЬ · ОЧЕРЕДЬ",
+    Screen.ADMIN_PENDING: "АКТИВНЫЕ БРОНИ · НОВЫЕ",
+    Screen.ADMIN_APPROVED: "ПОДТВЕРЖДЁННЫЕ СЕГОДНЯ",
+    Screen.ADMIN_REJECTED: "ОТКЛОНЁННЫЕ СЕГОДНЯ",
+    Screen.ADMIN_BOOKING: "КАРТОЧКА БРОНИ",
+    Screen.ADMIN_BOOKING_REJECT: "ОТКЛОНЕНИЕ БРОНИ",
+    Screen.ADMIN_BOOKING_CANCEL: "ОТМЕНА БРОНИ",
+    Screen.ADMIN_BOOKING_EDIT: "ИЗМЕНЕНИЕ БРОНИ",
+    Screen.ADMIN_MANUAL: "РУЧНОЕ СОЗДАНИЕ БРОНИ",
+    Screen.ADMIN_SCHEDULE: "РАСПИСАНИЕ И СЛОТЫ",
+    Screen.ADMIN_TARIFFS: "ТАРИФЫ И ДОП. УСЛУГИ",
+    Screen.ADMIN_TARIFF_ITEM: "НАСТРОЙКА ТАРИФА",
+    Screen.ADMIN_BRANCHES: "ТОЧКИ СЕТИ",
+    Screen.ADMIN_BRANCH_ITEM: "КАРТОЧКА ТОЧКИ",
     Screen.ADMIN_ADMINS: "АДМИНИСТРАТОРЫ",
     Screen.ADMIN_ADMIN: "КАРТОЧКА АДМИНИСТРАТОРА",
     Screen.ADMIN_ADD: "НОВЫЙ АДМИНИСТРАТОР",
+    Screen.ADMIN_HANDOVER: "ПЕРЕДАЧА ТОЧКИ",
+    Screen.ADMIN_NOTIFY: "УВЕДОМЛЕНИЯ АДМИНУ",
+    Screen.ADMIN_SETTINGS: "НАСТРОЙКИ КЛУБА",
     Screen.PRIVACY: "ПЕРСОНАЛЬНЫЕ ДАННЫЕ (152-ФЗ)",
     Screen.PRIVACY_CONFIRM: "ОТЗЫВ СОГЛАСИЯ (152-ФЗ)",
     Screen.CONSENT: "СОГЛАСИЕ НА ОБРАБОТКУ ДАННЫХ (152-ФЗ)",
@@ -132,6 +180,7 @@ SCREEN_ICONS: Final[dict[str, str]] = {
     Screen.FAQ_ITEM: "💬",
     Screen.CONTACTS: "📞",
     Screen.BOOKINGS: "📋",
+    Screen.BOOK_BRANCH: "🏢",
     Screen.BOOK_TARIFF: "🎮",
     Screen.BOOK_TIME: "🕒",
     Screen.BOOK_TIME_TEXT: "✏️",
@@ -141,18 +190,60 @@ SCREEN_ICONS: Final[dict[str, str]] = {
     Screen.BOOK_DONE: "✅",
     Screen.ADMIN: "🛠",
     Screen.ADMIN_PENDING: "📋",
+    Screen.ADMIN_APPROVED: "✅",
+    Screen.ADMIN_REJECTED: "🚫",
+    Screen.ADMIN_BOOKING: "🎫",
+    Screen.ADMIN_BOOKING_REJECT: "❌",
+    Screen.ADMIN_BOOKING_CANCEL: "🚫",
+    Screen.ADMIN_BOOKING_EDIT: "✏️",
+    Screen.ADMIN_MANUAL: "➕",
+    Screen.ADMIN_SCHEDULE: "🗓",
+    Screen.ADMIN_TARIFFS: "💰",
+    Screen.ADMIN_TARIFF_ITEM: "🏷",
+    Screen.ADMIN_BRANCHES: "🏢",
+    Screen.ADMIN_BRANCH_ITEM: "📍",
     Screen.ADMIN_ADMINS: "👥",
     Screen.ADMIN_ADMIN: "🧑‍💼",
     Screen.ADMIN_ADD: "➕",
+    Screen.ADMIN_HANDOVER: "🔄",
+    Screen.ADMIN_NOTIFY: "🔔",
+    Screen.ADMIN_SETTINGS: "⚙️",
     Screen.PRIVACY: "🛡",
     Screen.PRIVACY_CONFIRM: "🚫",
     Screen.CONSENT: "🛡",
     Screen.CONSENT_REVOKED: "🚫",
 }
 
+#: Экраны админ-панели (закрыты фильтром прав в cb_navigate).
+ADMIN_ONLY_SCREENS: Final[frozenset[str]] = frozenset(
+    {
+        Screen.ADMIN,
+        Screen.ADMIN_PENDING,
+        Screen.ADMIN_APPROVED,
+        Screen.ADMIN_REJECTED,
+        Screen.ADMIN_BOOKING,
+        Screen.ADMIN_BOOKING_REJECT,
+        Screen.ADMIN_BOOKING_CANCEL,
+        Screen.ADMIN_BOOKING_EDIT,
+        Screen.ADMIN_MANUAL,
+        Screen.ADMIN_SCHEDULE,
+        Screen.ADMIN_TARIFFS,
+        Screen.ADMIN_TARIFF_ITEM,
+        Screen.ADMIN_BRANCHES,
+        Screen.ADMIN_BRANCH_ITEM,
+        Screen.ADMIN_ADMINS,
+        Screen.ADMIN_ADMIN,
+        Screen.ADMIN_ADD,
+        Screen.ADMIN_HANDOVER,
+        Screen.ADMIN_NOTIFY,
+        Screen.ADMIN_SETTINGS,
+    }
+)
+
 #: Экраны-шаги бронирования: на них «Назад» ведёт на предыдущий шаг.
 BOOKING_SCREENS: Final[frozenset[str]] = frozenset(
     {
+        Screen.BOOK_BRANCH,
         Screen.BOOK_TARIFF,
         Screen.BOOK_TIME,
         Screen.BOOK_TIME_TEXT,
@@ -393,6 +484,7 @@ def faq_answer_keyboard() -> InlineKeyboardMarkup:
 
 
 __all__ = [
+    "ADMIN_ONLY_SCREENS",
     "BOOKING_SCREENS",
     "BTN_BACK",
     "BTN_BOOK_HERO",

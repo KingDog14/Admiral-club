@@ -40,14 +40,16 @@ Telegram Bot API жёстко ограничивает заливку фона `
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
-import re
 from typing import Final
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-BUTTON_ICONS_DIR: Final[Path] = Path(__file__).resolve().parent / "assets" / "button_icons"
+BUTTON_ICONS_DIR: Final[Path] = (
+    Path(__file__).resolve().parent / "assets" / "button_icons"
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -66,7 +68,9 @@ class Surface:
     DANGER: Final[str] = "danger"
 
 
-VALID_STYLES: Final[frozenset[str]] = frozenset({Surface.HERO, Surface.ACCENT, Surface.DANGER})
+VALID_STYLES: Final[frozenset[str]] = frozenset(
+    {Surface.HERO, Surface.ACCENT, Surface.DANGER}
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -75,16 +79,18 @@ VALID_STYLES: Final[frozenset[str]] = frozenset({Surface.HERO, Surface.ACCENT, S
 class Tone:
     """Идентификаторы 10 хроматических тонов интерфейса."""
 
-    MINT: Final[str] = "mint"            # #24F0A8 — главный CTA, Standart, «Сейчас»
-    AMBER: Final[str] = "amber"          # #FFB224 — VIP, дневной пакет, цены и предоплата
+    MINT: Final[str] = "mint"  # #24F0A8 — главный CTA, Standart, «Сейчас»
+    AMBER: Final[str] = "amber"  # #FFB224 — VIP, дневной пакет, цены и предоплата
     TANGERINE: Final[str] = "tangerine"  # #FF6224 — S VIP, утренний пакет, FACEIT
-    CRYO: Final[str] = "cryo"            # #30D2EE — Double, ПК и железо, контакты
-    SAPPHIRE: Final[str] = "sapphire"    # #3B82F6 — активная вкладка, реквизиты, мои брони
-    AMETHYST: Final[str] = "amethyst"    # #A855F7 — ночной пакет, ночной FAQ, команда
-    INDIGO: Final[str] = "indigo"        # #6366F1 — правила клуба, защита ПДн 152-ФЗ
-    JADE: Final[str] = "jade"            # #14B8A6 — оплата на месте, гибкое время
-    RUBY: Final[str] = "ruby"            # #FF485C — отмена, отказ, антифрод-памятка
-    SLATE: Final[str] = "slate"          # #94A3B8 — спокойная навигация («Назад», «В меню»)
+    CRYO: Final[str] = "cryo"  # #30D2EE — Double, ПК и железо, контакты
+    SAPPHIRE: Final[str] = (
+        "sapphire"  # #3B82F6 — активная вкладка, реквизиты, мои брони
+    )
+    AMETHYST: Final[str] = "amethyst"  # #A855F7 — ночной пакет, ночной FAQ, команда
+    INDIGO: Final[str] = "indigo"  # #6366F1 — правила клуба, защита ПДн 152-ФЗ
+    JADE: Final[str] = "jade"  # #14B8A6 — оплата на месте, гибкое время
+    RUBY: Final[str] = "ruby"  # #FF485C — отмена, отказ, антифрод-памятка
+    SLATE: Final[str] = "slate"  # #94A3B8 — спокойная навигация («Назад», «В меню»)
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,9 +322,7 @@ def is_custom_emoji_enabled_for_bot(bot_key: int | None = None) -> bool:
     """Проверить, активны ли custom-emoji иконки кнопок для данного бота."""
     if not _CUSTOM_EMOJI_IDS:
         return False
-    if bot_key is not None and bot_key in _DISABLED_BOT_KEYS:
-        return False
-    return True
+    return not (bot_key is not None and bot_key in _DISABLED_BOT_KEYS)
 
 
 def disable_custom_emoji_for_bot(bot_key: int) -> None:
@@ -397,6 +401,13 @@ _DESTRUCTIVE_TOKENS: Final[tuple[str, ...]] = (
     "revoke",
     ":no:",
     ":del:",
+    ":rej:",
+    ":can:",
+    ":noshow:",
+    "cli:cancel:",
+    "adm_del",
+    "admin_bk_rej",
+    "admin_bk_can",
 )
 
 
@@ -456,11 +467,19 @@ def audit_keyboard_harmony(
                 issues.append(f"Неизвестный style={style!r} на {button.text!r}")
 
         # Запрещаем смешивать разные яркие заливки в одной строке, кроме бинарных решений
-        if len(row_styles) > 1 and row_styles != {Surface.HERO, Surface.DANGER} and row_styles != {Surface.DANGER, Surface.ACCENT}:
-            issues.append(f"Строка {row_idx} смешивает конкурирующие заливки: {sorted(row_styles)}")
+        if (
+            len(row_styles) > 1
+            and row_styles != {Surface.HERO, Surface.DANGER}
+            and row_styles != {Surface.DANGER, Surface.ACCENT}
+        ):
+            issues.append(
+                f"Строка {row_idx} смешивает конкурирующие заливки: {sorted(row_styles)}"
+            )
 
     if not allow_batch_decisions and hero > 1:
-        issues.append(f"На экране {hero} кнопок success (допустим максимум 1 главный CTA)")
+        issues.append(
+            f"На экране {hero} кнопок success (допустим максимум 1 главный CTA)"
+        )
 
     if not allow_batch_decisions and total >= 5 and glass / total < 0.45:
         issues.append(

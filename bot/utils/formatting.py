@@ -133,9 +133,15 @@ def now_text(tz: ZoneInfo) -> str:
 def today_date_text(tz: ZoneInfo) -> str:
     """Текущая дата клуба по-русски: «23 октября 2026, пятница»."""
     moment = datetime.now(tz)
-    weekday = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")[
-        moment.weekday()
-    ]
+    weekday = (
+        "понедельник",
+        "вторник",
+        "среда",
+        "четверг",
+        "пятница",
+        "суббота",
+        "воскресенье",
+    )[moment.weekday()]
     return f"{moment.day} {MONTHS_GENITIVE[moment.month - 1]} {moment.year}, {weekday}"
 
 
@@ -149,7 +155,9 @@ def plural(count: int, one: str, few: str, many: str) -> str:
     return many
 
 
-def user_link(user_id: int, username: str | None = None, first_name: str | None = None) -> str:
+def user_link(
+    user_id: int, username: str | None = None, first_name: str | None = None
+) -> str:
     """HTML-ссылка на пользователя для админ-панели."""
     if username:
         return f'<a href="https://t.me/{escape_html(username)}">@{escape_html(username)}</a>'

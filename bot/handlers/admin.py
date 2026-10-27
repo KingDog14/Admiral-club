@@ -35,8 +35,9 @@ from aiogram.types import CallbackQuery, Message
 from bot import texts
 from bot.config import AppConfig
 from bot.db.database import Database
-from bot.db.models import AdminRole, BookingStatus
+from bot.db.models import AdminRole, BookingStatus, RejectReason
 from bot.filters.access import IsAdmin, IsPrivateChat
+from bot.handlers.admin_manage import VIEWER_FORBIDDEN_ALERT, manage_router
 from bot.keyboards.inline import (
     CB_ADMIN_ADD,
     CB_ADMIN_ADD_CANCEL,
@@ -56,6 +57,7 @@ from bot.keyboards.inline import (
     parse_admin_toggle,
 )
 from bot.services.admins import AdminRegistry
+from bot.services.club_config import admin_branch_scope
 from bot.services.notifications import (
     CALLBACK_ANSWER_LIMIT,
     CAPTION_LIMIT,
@@ -65,6 +67,7 @@ from bot.services.notifications import (
     resolve_decided_by,
     sync_peer_admins,
 )
+from bot.services.schedule import extract_slot_window, suggest_alternatives
 from bot.states import (
     DATA_SCREEN,
     DATA_SCREEN_MESSAGE,
@@ -81,9 +84,11 @@ logger = logging.getLogger(__name__)
 router = Router(name="admin")
 router.message.filter(IsAdmin(), IsPrivateChat())
 router.callback_query.filter(IsAdmin(), IsPrivateChat())
+router.include_router(manage_router)
 
-#: Числовой Telegram ID: от 3 цифр, без @username и лишних символов.
+#: Числовой Telegram ID (3+ цифр) или «Имя 123456789» / «Имя | 123456789».
 _ADMIN_ID_RE = re.compile(r"^\d{3,}$")
+_ADMIN_NAME_AND_ID_RE = re.compile(r"^(.+?)[|\s]+(\d{3,})$")
 
 
 # --------------------------------------------------------------------------- #
@@ -99,7 +104,9 @@ def _navigate(
 ) -> Navigator:
     """Собрать навигатор под событие администратора."""
     if isinstance(event, CallbackQuery):
-        return Navigator.from_callback(event, db=db, cfg=cfg, state=state, admins=admins)
+        return Navigator.from_callback(
+            event, db=db, cfg=cfg, state=state, admins=admins
+        )
     return Navigator.from_message(event, db=db, cfg=cfg, state=state, admins=admins)
 
 
@@ -161,7 +168,9 @@ async def _deny_management(
 ) -> None:
     """Сообщить, что управление списком доступно только владельцу."""
     admin = await db.get_admin(user_id) if user_id else None
-    role = admin.role_title if admin is not None else AdminRole.title(AdminRole.OPERATOR)
+    role = (
+        admin.role_title if admin is not None else AdminRole.title(AdminRole.OPERATOR)
+    )
     await callback.answer(
         truncate(texts.ADMIN_MANAGE_FORBIDDEN.format(role=role), CALLBACK_ANSWER_LIMIT),
         show_alert=True,
@@ -201,7 +210,9 @@ async def _apply_admin_view(
             for b in row
         )
     )
-    is_screen = (screen_mid is not None and int(screen_mid) == message_id) or has_nav_buttons
+    is_screen = (
+        screen_mid is not None and int(screen_mid) == message_id
+    ) or has_nav_buttons
 
     caption = getattr(message, "caption", "") or ""
     raw_text = getattr(message, "text", "") or ""
@@ -214,18 +225,26 @@ async def _apply_admin_view(
             return
         updated = truncate(caption + note, CAPTION_LIMIT)
         if not await safe_edit_message_caption(bot, chat_id, message_id, updated):
-            await bot.send_message(chat_id=chat_id, text=truncate(note.strip(), MESSAGE_LIMIT))
+            await bot.send_message(
+                chat_id=chat_id, text=truncate(note.strip(), MESSAGE_LIMIT)
+            )
         return
 
     if "НОВАЯ БРОНЬ" in raw_text:
         if note.strip() not in raw_text:
             updated = truncate(raw_text + note, MESSAGE_LIMIT)
             if not await safe_edit_message_text(bot, chat_id, message_id, updated):
-                await bot.send_message(chat_id=chat_id, text=truncate(note.strip(), MESSAGE_LIMIT))
+                await bot.send_message(
+                    chat_id=chat_id, text=truncate(note.strip(), MESSAGE_LIMIT)
+                )
         return
 
     navigator = _navigate(callback, db=db, cfg=cfg, state=state, admins=admins)
-    await navigator.show(Screen.ADMIN_PENDING, 0, push=False)
+    cur = await navigator.current()
+    if cur.get("s") == Screen.ADMIN_BOOKING and cur.get("a"):
+        await navigator.show(Screen.ADMIN_BOOKING, cur.get("a"), push=False)
+    else:
+        await navigator.show(Screen.ADMIN_PENDING, 0, push=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -383,24 +402,44 @@ async def msg_admin_id(
     """Принять числовой Telegram ID нового администратора."""
     navigator = _navigate(message, db=db, cfg=cfg, state=state, admins=admins)
     raw = (message.text or "").strip()
-    await safe_delete_message(bot, navigator.user_id, message.message_id)
+    deleted = await safe_delete_message(bot, navigator.user_id, message.message_id)
+    navigator.on_input_deleted(deleted)
 
-    if not _ADMIN_ID_RE.match(raw):
-        await navigator.show(Screen.ADMIN_ADD, push=False, note=texts.ADMIN_ADD_INVALID_ID)
-        return
+    display_name = ""
+    if _ADMIN_ID_RE.match(raw):
+        admin_id = int(raw)
+    else:
+        m = _ADMIN_NAME_AND_ID_RE.match(raw)
+        if not m or raw.startswith("@") or "t.me/" in raw:
+            await navigator.show(
+                Screen.ADMIN_ADD, push=False, note=texts.ADMIN_ADD_INVALID_ID
+            )
+            return
+        display_name = m.group(1).strip(" |,-")[:48]
+        admin_id = int(m.group(2))
 
-    admin_id = int(raw)
     operator_id = message.from_user.id if message.from_user else None
     await _keep_navigation(state)
 
     existing = await db.get_admin(admin_id)
-    label = await _admin_label(bot, db, admin_id)
+    label = (
+        f"<b>{escape_html(display_name)}</b> (ID: <code>{admin_id}</code>)"
+        if display_name
+        else await _admin_label(bot, db, admin_id)
+    )
 
     if existing is None:
-        admin = await db.add_admin(admin_id, role=AdminRole.OPERATOR, added_by=operator_id)
+        admin = await db.add_admin(
+            admin_id,
+            role=AdminRole.OPERATOR,
+            added_by=operator_id,
+            display_name=display_name,
+        )
         if admins is not None:
-            admins.remember(admin_id)
-        note = texts.ADMIN_ADDED.format(user_link=label, user_id=admin.user_id, role=admin.role_title)
+            admins.remember(admin_id, role=admin.role)
+        note = texts.ADMIN_ADDED.format(
+            user_link=label, user_id=admin.user_id, role=admin.role_title
+        )
         if await db.get_user(admin_id) is None:
             note += "\n\n" + texts.ADMIN_NOT_STARTED_WARNING.format(user_link=label)
         logger.info("Администратор %s добавлен пользователем %s", admin_id, operator_id)
@@ -409,14 +448,18 @@ async def msg_admin_id(
             admin_id,
             role=existing.role,
             added_by=operator_id or existing.added_by,
+            display_name=display_name or existing.display_name,
+            branch_id=existing.branch_id,
         )
         if admins is not None:
-            admins.remember(admin_id)
+            admins.remember(admin_id, role=admin.role)
         note = texts.ADMIN_ALREADY_EXISTS.format(
             user_link=label,
             user_id=admin.user_id,
             role=admin.role_title,
-            state=texts.ADMINS_STATE_ACTIVE if admin.is_active else texts.ADMINS_STATE_DISABLED,
+            state=texts.ADMINS_STATE_ACTIVE
+            if admin.is_active
+            else texts.ADMINS_STATE_DISABLED,
         )
         logger.info("Администратор %s уже был в списке — включён снова", admin_id)
 
@@ -469,7 +512,9 @@ async def cb_admin_toggle(
         return
     if target == cfg.admin_id:
         await navigator.alert(
-            texts.ADMIN_OWNER_PROTECTED.format(user_link=await _admin_label(bot, db, target))
+            texts.ADMIN_OWNER_PROTECTED.format(
+                user_link=await _admin_label(bot, db, target)
+            )
         )
         return
     if target == user_id:
@@ -482,10 +527,14 @@ async def cb_admin_toggle(
     make_active = not admin.is_active
     await db.set_admin_active(target, make_active)
     if admins is not None:
-        admins.remember(target) if make_active else admins.forget(target)
+        admins.remember(target, role=admin.role) if make_active else admins.forget(
+            target
+        )
 
     label = await _admin_label(bot, db, target)
-    note = (texts.ADMIN_ENABLED if make_active else texts.ADMIN_DISABLED).format(user_link=label)
+    note = (texts.ADMIN_ENABLED if make_active else texts.ADMIN_DISABLED).format(
+        user_link=label
+    )
     logger.info(
         "Администратор %s %s пользователем %s",
         target,
@@ -495,7 +544,9 @@ async def cb_admin_toggle(
     await _refresh_after_manage(navigator, target, note)
 
 
-@router.callback_query(F.data.startswith((CB_ADMIN_PROMOTE_PREFIX, CB_ADMIN_DEMOTE_PREFIX)))
+@router.callback_query(
+    F.data.startswith((CB_ADMIN_PROMOTE_PREFIX, CB_ADMIN_DEMOTE_PREFIX))
+)
 async def cb_admin_role(
     callback: CallbackQuery,
     state: FSMContext,
@@ -523,7 +574,9 @@ async def cb_admin_role(
         return
     if target == cfg.admin_id:
         await navigator.alert(
-            texts.ADMIN_OWNER_PROTECTED.format(user_link=await _admin_label(bot, db, target))
+            texts.ADMIN_OWNER_PROTECTED.format(
+                user_link=await _admin_label(bot, db, target)
+            )
         )
         return
     if admin.role == new_role:
@@ -534,9 +587,13 @@ async def cb_admin_role(
         return
 
     await db.set_admin_role(target, new_role)
+    if admins is not None and admin.is_active:
+        admins.remember(target, role=new_role)
     label = await _admin_label(bot, db, target)
     note = (
-        texts.ADMIN_ROLE_PROMOTED if new_role == AdminRole.OWNER else texts.ADMIN_ROLE_DEMOTED
+        texts.ADMIN_ROLE_PROMOTED
+        if new_role == AdminRole.OWNER
+        else texts.ADMIN_ROLE_DEMOTED
     ).format(user_link=label)
     logger.info("Администратор %s получил роль %s от %s", target, new_role, user_id)
     await _refresh_after_manage(navigator, target, note)
@@ -569,7 +626,9 @@ async def cb_admin_delete(
         return
     if target == cfg.admin_id:
         await navigator.alert(
-            texts.ADMIN_OWNER_PROTECTED.format(user_link=await _admin_label(bot, db, target))
+            texts.ADMIN_OWNER_PROTECTED.format(
+                user_link=await _admin_label(bot, db, target)
+            )
         )
         return
     if target == user_id:
@@ -584,13 +643,17 @@ async def cb_admin_delete(
     if admins is not None:
         admins.forget(target)
     logger.info("Администратор %s удалён пользователем %s", target, user_id)
-    await _refresh_after_manage(navigator, target, texts.ADMIN_REMOVED.format(user_link=label), deleted=True)
+    await _refresh_after_manage(
+        navigator, target, texts.ADMIN_REMOVED.format(user_link=label), deleted=True
+    )
 
 
 # --------------------------------------------------------------------------- #
 # Решения по заявкам: подтвердить / отклонить
 # --------------------------------------------------------------------------- #
-@router.callback_query(F.data.startswith((CB_ADMIN_APPROVE_PREFIX, CB_ADMIN_REJECT_PREFIX)))
+@router.callback_query(
+    F.data.startswith((CB_ADMIN_APPROVE_PREFIX, CB_ADMIN_REJECT_PREFIX))
+)
 async def cb_decision(
     callback: CallbackQuery,
     state: FSMContext,
@@ -612,12 +675,37 @@ async def cb_decision(
     approved = status == BookingStatus.APPROVED
     admin_id = callback.from_user.id if callback.from_user else None
 
+    if admin_id is not None:
+        if admins is not None:
+            can_act = await admins.can_act(admin_id)
+        else:
+            rec = await db.get_admin(admin_id)
+            can_act = rec.can_act if rec is not None else True
+        if not can_act:
+            await callback.answer(VIEWER_FORBIDDEN_ALERT, show_alert=True)
+            return
+
     booking = await db.get_booking(booking_id)
     if booking is None:
-        await callback.answer(f"Заявка №{booking_id} не найдена в базе", show_alert=True)
+        await callback.answer(
+            f"Заявка №{booking_id} не найдена в базе", show_alert=True
+        )
         return
 
-    if not await db.set_status_if_pending(booking_id, status, decided_by=admin_id):
+    if admin_id is not None:
+        rec = await db.get_admin(admin_id)
+        scope = admin_branch_scope(rec)
+        if scope is not None and booking.branch_id != scope:
+            await callback.answer(
+                "🏢 Эта бронь относится к другой точке сети.",
+                show_alert=True,
+            )
+            return
+
+    reason = None if approved else RejectReason.NO_SEATS
+    if not await db.set_status_if_pending(
+        booking_id, status, decided_by=admin_id, reject_reason=reason
+    ):
         # Заявку уже обработали — возможно, другой администратор.
         fresh = await db.get_booking(booking_id) or booking
         decider = await resolve_decided_by(bot, db, fresh.decided_by)
@@ -646,13 +734,35 @@ async def cb_decision(
         )
         return
 
-    delivered = await deliver_decision(bot, cfg, booking, approved)
+    fresh = await db.get_booking(booking_id) or booking
+    alts: tuple[str, ...] = ()
+    if not approved:
+        from datetime import datetime
+
+        now = datetime.now(cfg.timezone)
+        iso_date = fresh.booking_date or now.date().isoformat()
+        desired = fresh.slot_start
+        if not desired:
+            _, desired, _ = extract_slot_window(fresh.time_slot, now)
+        alts = await suggest_alternatives(
+            db,
+            iso_date,
+            desired,
+            branch_id=fresh.branch_id or 1,
+            guests_count=fresh.guests_count,
+        )
+
+    delivered = await deliver_decision(
+        bot, cfg, fresh, approved, db=db, reason=reason, alternatives=alts
+    )
     decided_by = await resolve_decided_by(bot, db, admin_id)
 
     decision_text = texts.ADMIN_DECISION_OK if approved else texts.ADMIN_DECISION_NO
     if not delivered:
         decision_text += " Клиенту уведомление не доставлено."
-    await callback.answer(truncate(decision_text.format(booking_id=booking_id), CALLBACK_ANSWER_LIMIT))
+    await callback.answer(
+        truncate(decision_text.format(booking_id=booking_id), CALLBACK_ANSWER_LIMIT)
+    )
 
     await _apply_admin_view(
         bot,

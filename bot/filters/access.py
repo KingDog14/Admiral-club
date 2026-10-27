@@ -53,8 +53,10 @@ class IsAdmin(BaseFilter):
         if admins is not None:
             try:
                 allowed = await admins.is_admin(user_id)
-            except Exception:  # noqa: BLE001
-                logger.exception("Сбой реестра администраторов при проверке %s", user_id)
+            except Exception:
+                logger.exception(
+                    "Сбой реестра администраторов при проверке %s", user_id
+                )
             else:
                 if not allowed:
                     logger.debug("Пользователь %s не администратор (реестр)", user_id)
@@ -65,7 +67,7 @@ class IsAdmin(BaseFilter):
                 if await db.is_active_admin(user_id):
                     return True
                 total, _ = await db.count_admins()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("Сбой проверки администратора %s в базе", user_id)
             else:
                 if total:
@@ -75,7 +77,9 @@ class IsAdmin(BaseFilter):
         # Ни реестра, ни базы (или таблица admins пуста) — сверяемся с .env.
         allowed = cfg is not None and cfg.is_env_admin(user_id)
         if not allowed:
-            logger.debug("Пользователь %s не администратор — событие отклонено", user_id)
+            logger.debug(
+                "Пользователь %s не администратор — событие отклонено", user_id
+            )
         return allowed
 
 
@@ -84,7 +88,7 @@ class IsPrivateChat(BaseFilter):
 
     name = "is_private_chat"
 
-    async def __call__(self, event: Any, event_chat: Chat | None = None) -> bool:  # noqa: ARG002
+    async def __call__(self, event: Any, event_chat: Chat | None = None) -> bool:
         # event не используется: тип чата aiogram кладёт в контекст как event_chat.
         return event_chat is not None and event_chat.type == ChatType.PRIVATE
 
