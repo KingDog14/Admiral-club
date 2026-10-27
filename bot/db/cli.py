@@ -45,7 +45,9 @@ async def create_database() -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+        level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s"
+    )
     asyncio.run(create_database())
 
 

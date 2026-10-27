@@ -50,14 +50,20 @@ CONSENT_CALLBACKS: tuple[str, ...] = (
     CB_CONSENT_REVOKE_NO,
 )
 
+CB_BRANCH_PREFIX: str = "bk:br:"
 CB_TARIFF_PREFIX: str = "bk:t:"
 CB_TIME_PREFIX: str = "bk:w:"
+CB_GUESTS_PREFIX: str = "bk:g:"
+CB_EXTRA_PREFIX: str = "bk:ex:"
 CB_PAY_PREFIX: str = "bk:pay:"
 CB_PAY_CHECK: str = "bk:pay:check"
 CB_PAY_SPOT: str = "bk:pay:spot"
+CB_PAY_QR: str = "bk:qr"
 CB_BOOKING_CANCEL: str = "bk:cancel"
 #: Шаг назад внутри мастера бронирования.
 CB_BOOKING_BACK: str = "bk:back"
+#: Отмена брони самим гостем из раздела «Мои брони».
+CB_CLIENT_CANCEL_PREFIX: str = "cli:cancel:"
 
 #: Способы оплаты на шаге 4.
 PAY_WAY_CHECK: str = "check"
@@ -76,12 +82,35 @@ CB_ADMIN_TOGGLE_PREFIX: str = "ad:admin:tg:"
 CB_ADMIN_PROMOTE_PREFIX: str = "ad:admin:up:"
 CB_ADMIN_DEMOTE_PREFIX: str = "ad:admin:dn:"
 CB_ADMIN_DELETE_PREFIX: str = "ad:admin:del:"
+CB_ADMIN_ROLE_PREFIX: str = "ad:admin:role:"
+CB_ADMIN_ASSIGN_BRANCH_PREFIX: str = "ad:admin:br:"
+CB_ADMIN_INVITE_PREFIX: str = "ad:admin:inv:"
+CB_ADMIN_HANDOVER_PREFIX: str = "ad:admin:ho:"
+
+# Расширенная админ-панель: карточка брони, ручная бронь, расписание, тарифы, точки, пуши, настройки.
+CB_ADMIN_RECEIPT_PREFIX: str = "ad:rcpt:"
+CB_ADMIN_REJECT_REASON_PREFIX: str = "ad:rej:"
+CB_ADMIN_REJECT_CONFIRM_PREFIX: str = "ad:rejc:"
+CB_ADMIN_CANCEL_REASON_PREFIX: str = "ad:can:"
+CB_ADMIN_CANCEL_CONFIRM_PREFIX: str = "ad:canc:"
+CB_ADMIN_NOSHOW_PREFIX: str = "ad:noshow:"
+CB_ADMIN_EDIT_PREFIX: str = "ad:ed:"
+CB_ADMIN_MANUAL_PREFIX: str = "ad:man:"
+CB_ADMIN_SCHED_PREFIX: str = "ad:sch:"
+CB_ADMIN_TARIFF_ADM_PREFIX: str = "ad:tf:"
+CB_ADMIN_BRANCH_ADM_PREFIX: str = "ad:br:"
+CB_ADMIN_NOTIFY_PREFIX: str = "ad:ntf:"
+CB_ADMIN_SETTINGS_PREFIX: str = "ad:set:"
 
 #: Префиксы клиентского сценария бронирования (для обработки «протухших» кнопок).
 BOOKING_CALLBACK_PREFIXES: tuple[str, ...] = (
+    CB_BRANCH_PREFIX,
     CB_TARIFF_PREFIX,
     CB_TIME_PREFIX,
+    CB_GUESTS_PREFIX,
+    CB_EXTRA_PREFIX,
     CB_PAY_PREFIX,
+    CB_PAY_QR,
     CB_BOOKING_BACK,
     CB_BOOKING_CANCEL,
 )
@@ -455,8 +484,15 @@ def admins_nav_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [_btn("➕ Добавить", CB_ADMIN_ADD, style=Surface.HERO, tone=Tone.MINT)],
             [
-                _btn("🔄 Обновить", CB_ADMIN_ADMINS, style=Surface.GLASS, tone=Tone.SLATE),
-                _btn("📊 Статистика", CB_ADMIN_STATS, style=Surface.GLASS, tone=Tone.SAPPHIRE),
+                _btn(
+                    "🔄 Обновить", CB_ADMIN_ADMINS, style=Surface.GLASS, tone=Tone.SLATE
+                ),
+                _btn(
+                    "📊 Статистика",
+                    CB_ADMIN_STATS,
+                    style=Surface.GLASS,
+                    tone=Tone.SAPPHIRE,
+                ),
             ],
         ]
     )
@@ -516,7 +552,9 @@ def admins_list_keyboard(
     rows.append(
         [
             _btn("🔄 Обновить", CB_ADMIN_ADMINS, style=Surface.GLASS, tone=Tone.SLATE),
-            _btn("📊 Статистика", CB_ADMIN_STATS, style=Surface.GLASS, tone=Tone.SAPPHIRE),
+            _btn(
+                "📊 Статистика", CB_ADMIN_STATS, style=Surface.GLASS, tone=Tone.SAPPHIRE
+            ),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)

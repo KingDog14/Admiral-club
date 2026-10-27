@@ -247,7 +247,9 @@ def main(argv: list[str] | None = None) -> int:
         print("\n=== DESCRIPTION PICTURE (/setdescriptionpic, 640×360) ===")
         print(f"PNG:  {BASE_DIR / 'bot' / 'assets' / 'description_pic.png'}")
         print(f"JPEG: {BASE_DIR / 'bot' / 'assets' / 'description_pic.jpg'}")
-        print(f"HD:   {BASE_DIR / 'bot' / 'assets' / 'description_pic_hd.png'} (1280×720)")
+        print(
+            f"HD:   {BASE_DIR / 'bot' / 'assets' / 'description_pic_hd.png'} (1280×720)"
+        )
         return 0
 
     if args.init_db:

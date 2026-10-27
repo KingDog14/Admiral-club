@@ -823,7 +823,10 @@ def render_menu_card(
 # --------------------------------------------------------------------------- #
 # 2. Залы и цены (полная визуальная таблица прайса)
 # --------------------------------------------------------------------------- #
-def render_prices_card(club: ClubInfo) -> RenderedCard:
+def render_prices_card(
+    club: ClubInfo, tariffs: Sequence[Any] | None = None
+) -> RenderedCard:
+    tariff_items = list(tariffs) if tariffs is not None else list(texts.TARIFFS)
     tariff_sig = tuple(
         (
             t.key,
@@ -836,7 +839,7 @@ def render_prices_card(club: ClubInfo) -> RenderedCard:
             t.night,
             t.night_weekend,
         )
-        for t in texts.TARIFFS
+        for t in tariff_items
     )
     key = _make_key("prices", club.name, club.city, tariff_sig)
 
@@ -894,7 +897,7 @@ def render_prices_card(club: ClubInfo) -> RenderedCard:
         draw.line([(72, 232), (CARD_W - 72, 232)], fill=(255, 255, 255, 36), width=1)
 
         row_h = 88
-        for idx, t in enumerate(texts.TARIFFS[:4]):
+        for idx, t in enumerate(tariff_items[:4]):
             ry = 244 + idx * row_h
             accent = TIER_COLORS.get(t.key, COL_CYAN)
             if idx % 2 == 1:

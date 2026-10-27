@@ -3,10 +3,14 @@
 Класс :class:`Navigator` ведёт одно рабочее фото-сообщение пользователя:
 
 * при первом открытии отправляет карточку через ``sendPhoto``;
-* при всех переходах по меню, FAQ, правилам, шагам брони и админ-панели меняет
-  карточку, подпись и кнопки **в том же сообщении** через ``editMessageMedia``;
-* если старое сообщение недоступно (удалено, старше 48 часов или осталось от
-  текстовой версии бота) — отправляет свежую карточку и аккуратно удаляет старое.
+* при всех нажатиях инлайн-кнопок (:class:`CallbackQuery`: меню, FAQ, правила,
+  шаги брони, админ-панель) меняет карточку, подпись и кнопки **в том же
+  сообщении** через ``editMessageMedia``;
+* при входящих командах и сообщениях (:class:`Message`: ``/start``, ``/menu``,
+  ``/cancel``, ``/privacy``, ``/help``, ``/admin``, фото чека и т.д.), которые
+  появляются внизу чата, отправляет актуальную карточку **в самый низ чата**
+  под сообщением пользователя и удаляет прежний экран бота сверху, чтобы
+  интерфейс никогда не застревал наверху истории.
 """
 
 from __future__ import annotations
@@ -25,7 +29,11 @@ from bot.states import DATA_SCREEN, DATA_SCREEN_MESSAGE, DATA_SCREEN_STACK
 from bot.ui.render import CAPTION_LIMIT, ScreenView, ViewContext, render_screen
 from bot.ui.screens import SCREEN_BACK, Screen
 from bot.utils.formatting import truncate, truncate_html
-from bot.utils.telegram import safe_delete_message, safe_edit_message_media, send_photo_screen
+from bot.utils.telegram import (
+    safe_delete_message,
+    safe_edit_message_media,
+    send_photo_screen,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +67,8 @@ class Navigator:
         admins: AdminRegistry | None = None,
         user: TelegramUser | None = None,
         callback: CallbackQuery | None = None,
+        relocate: bool = False,
+        trigger_message_id: int | None = None,
     ) -> None:
         self.bot = bot
         self.db = db
@@ -69,6 +79,8 @@ class Navigator:
         self.user = user
         self.callback = callback
         self.message_id = message_id
+        self.relocate = relocate
+        self.trigger_message_id = trigger_message_id
 
     @classmethod
     def from_message(
@@ -79,6 +91,7 @@ class Navigator:
         cfg: AppConfig,
         state: FSMContext,
         admins: AdminRegistry | None = None,
+        relocate: bool = True,
     ) -> Navigator:
         return cls(
             bot=message.bot,
@@ -88,6 +101,8 @@ class Navigator:
             user_id=message.chat.id,
             admins=admins,
             user=message.from_user,
+            relocate=relocate,
+            trigger_message_id=message.message_id,
         )
 
     @classmethod
@@ -111,7 +126,17 @@ class Navigator:
             admins=admins,
             user=callback.from_user,
             callback=callback,
+            relocate=False,
         )
+
+    def on_input_deleted(self, deleted: bool) -> None:
+        """Сообщить навигатору, удалена ли промежуточная реплика ввода.
+
+        Если текстовый ответ пользователя (имя, своё время, ID администратора)
+        удалён ботом и между экраном и ответом не появлялось других сообщений,
+        карточка плавно обновляется на месте. Иначе экран переносится вниз чата.
+        """
+        self.relocate = not deleted
 
     @property
     def context(self) -> ViewContext:
@@ -138,7 +163,9 @@ class Navigator:
         stack = (await self.state.get_data()).get(DATA_SCREEN_STACK)
         if not isinstance(stack, list):
             return []
-        return [item for item in stack if isinstance(item, dict) and item.get(_KEY_SCREEN)]
+        return [
+            item for item in stack if isinstance(item, dict) and item.get(_KEY_SCREEN)
+        ]
 
     # --- переходы ----------------------------------------------------------- #
     async def show(
@@ -162,7 +189,13 @@ class Navigator:
         same_rules_tab = prev_screen == Screen.RULES and screen == Screen.RULES
 
         stack = await self._stack()
-        if push and not same and not same_rules_tab and prev_screen and prev_screen != Screen.CONSENT:
+        if (
+            push
+            and not same
+            and not same_rules_tab
+            and prev_screen
+            and prev_screen != Screen.CONSENT
+        ):
             stack.append(previous)
 
         await self.state.update_data(
@@ -193,7 +226,9 @@ class Navigator:
 
     async def reset(self, screen: str = Screen.MENU, arg: str = "") -> None:
         """Сбросить стек переходов и показать выбранный экран."""
-        await self.state.update_data(**{DATA_SCREEN_STACK: [], DATA_SCREEN: _entry(screen, arg)})
+        await self.state.update_data(
+            **{DATA_SCREEN_STACK: [], DATA_SCREEN: _entry(screen, arg)}
+        )
         await self.show(screen, arg, push=False)
 
     async def restart(
@@ -204,21 +239,22 @@ class Navigator:
         old_message_id: int | None = None,
     ) -> None:
         """Отправить свежую карточку в низ чата, а старый экран убрать (``/start``)."""
+        data = await self.state.get_data()
+        previous_id = (
+            old_message_id
+            if old_message_id is not None
+            else data.get(DATA_SCREEN_MESSAGE)
+        )
         self.message_id = None
+        self.relocate = True
         await self.state.update_data(
             **{
                 DATA_SCREEN_STACK: [],
-                DATA_SCREEN_MESSAGE: None,
+                DATA_SCREEN_MESSAGE: previous_id,
                 DATA_SCREEN: _entry(screen, arg),
             }
         )
         await self.show(screen, arg, push=False)
-        if (
-            old_message_id is not None
-            and self.message_id is not None
-            and int(old_message_id) != int(self.message_id)
-        ):
-            await safe_delete_message(self.bot, self.user_id, int(old_message_id))
 
     # --- отрисовка ---------------------------------------------------------- #
     async def redraw(self, *, note: str | None = None) -> None:
@@ -229,16 +265,24 @@ class Navigator:
         )
         caption = view.caption
         if note:
-            wrapped = note if "<blockquote>" in note else f"<blockquote>{note}</blockquote>"
+            wrapped = (
+                note if "<blockquote>" in note else f"<blockquote>{note}</blockquote>"
+            )
             caption = truncate_html(f"{wrapped}\n\n{caption}", CAPTION_LIMIT)
         await self._draw(view, caption)
 
     async def _draw(self, view: ScreenView, caption: str) -> None:
-        """Обновить медиа-карточку на месте или отправить новую, удалив устаревшую."""
+        """Обновить медиа-карточку на месте или перенести экран в самый низ чата."""
         stored_id = (await self.state.get_data()).get(DATA_SCREEN_MESSAGE)
         message_id = self.message_id or stored_id
+        has_intervening_messages = (
+            stored_id is not None
+            and self.trigger_message_id is not None
+            and int(self.trigger_message_id) > int(stored_id) + 1
+        )
+        should_relocate = self.relocate or has_intervening_messages
 
-        if message_id is not None:
+        if message_id is not None and not should_relocate:
             mid = int(message_id)
             if await safe_edit_message_media(
                 self.bot,
@@ -269,6 +313,8 @@ class Navigator:
             if message_id is not None and int(message_id) != int(new_id):
                 await safe_delete_message(self.bot, self.user_id, int(message_id))
             self.message_id = new_id
+            self.relocate = False
+            self.trigger_message_id = None
             await self.state.update_data(**{DATA_SCREEN_MESSAGE: new_id})
 
     # --- ответы на callback ------------------------------------------------- #
@@ -283,7 +329,9 @@ class Navigator:
     async def alert(self, text: str) -> None:
         await self.answer(text, alert=True)
 
-    async def notify(self, text: str, markup: InlineKeyboardMarkup | None = None) -> None:
+    async def notify(
+        self, text: str, markup: InlineKeyboardMarkup | None = None
+    ) -> None:
         await self.bot.send_message(
             chat_id=self.user_id,
             text=truncate(text, MESSAGE_TEXT_LIMIT),

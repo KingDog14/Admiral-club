@@ -14,7 +14,12 @@ from typing import TYPE_CHECKING, Any
 from aiogram import Bot
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError
-from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InputMediaPhoto, ReplyKeyboardRemove
+from aiogram.types import (
+    BufferedInputFile,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+    ReplyKeyboardRemove,
+)
 
 if TYPE_CHECKING:
     from bot.ui.cards import RenderedCard
@@ -39,7 +44,9 @@ def _is_custom_emoji_rejected(exc: BaseException) -> bool:
     )
 
 
-def _prepare_markup(bot: Bot, reply_markup: InlineKeyboardMarkup | None) -> InlineKeyboardMarkup | None:
+def _prepare_markup(
+    bot: Bot, reply_markup: InlineKeyboardMarkup | None
+) -> InlineKeyboardMarkup | None:
     if reply_markup is None:
         return None
     from bot.palette import prepare_markup_for_bot
@@ -92,8 +99,12 @@ async def safe_edit_message_text(
             return True
         if markup is not None and _is_custom_emoji_rejected(exc):
             plain_markup = _strip_rejected_custom_emoji(bot, markup)
-            return await safe_edit_message_text(bot, chat_id, message_id, text, plain_markup)
-        logger.debug("Не удалось отредактировать сообщение %s/%s: %s", chat_id, message_id, exc)
+            return await safe_edit_message_text(
+                bot, chat_id, message_id, text, plain_markup
+            )
+        logger.debug(
+            "Не удалось отредактировать сообщение %s/%s: %s", chat_id, message_id, exc
+        )
         return False
     return True
 
@@ -119,8 +130,12 @@ async def safe_edit_message_caption(
             return True
         if markup is not None and _is_custom_emoji_rejected(exc):
             plain_markup = _strip_rejected_custom_emoji(bot, markup)
-            return await safe_edit_message_caption(bot, chat_id, message_id, caption, plain_markup)
-        logger.debug("Не удалось отредактировать подпись %s/%s: %s", chat_id, message_id, exc)
+            return await safe_edit_message_caption(
+                bot, chat_id, message_id, caption, plain_markup
+            )
+        logger.debug(
+            "Не удалось отредактировать подпись %s/%s: %s", chat_id, message_id, exc
+        )
         return False
     return True
 
@@ -140,7 +155,7 @@ async def safe_edit_message_media(
     markup = _prepare_markup(bot, reply_markup)
     cached_fid = card_cache.get_file_id(bkey, card.cache_key)
 
-    for attempt_fid in ([cached_fid, None] if cached_fid else [None]):
+    for attempt_fid in [cached_fid, None] if cached_fid else [None]:
         media_input: str | BufferedInputFile = (
             attempt_fid
             if attempt_fid is not None
@@ -167,11 +182,15 @@ async def safe_edit_message_media(
                 return True
             if markup is not None and _is_custom_emoji_rejected(exc):
                 plain_markup = _strip_rejected_custom_emoji(bot, markup)
-                return await safe_edit_message_media(bot, chat_id, message_id, card, caption, plain_markup)
+                return await safe_edit_message_media(
+                    bot, chat_id, message_id, card, caption, plain_markup
+                )
             if attempt_fid is not None:
                 card_cache.invalidate_file_id(bkey, card.cache_key)
                 continue
-            logger.debug("Не удалось обновить медиа-экран %s/%s: %s", chat_id, message_id, exc)
+            logger.debug(
+                "Не удалось обновить медиа-экран %s/%s: %s", chat_id, message_id, exc
+            )
             return False
     return False
 
@@ -190,7 +209,7 @@ async def send_photo_screen(
     markup = _prepare_markup(bot, reply_markup)
     cached_fid = card_cache.get_file_id(bkey, card.cache_key)
 
-    for attempt_fid in ([cached_fid, None] if cached_fid else [None]):
+    for attempt_fid in [cached_fid, None] if cached_fid else [None]:
         photo_input: str | BufferedInputFile = (
             attempt_fid
             if attempt_fid is not None
@@ -210,11 +229,13 @@ async def send_photo_screen(
         except TelegramAPIError as exc:
             if markup is not None and _is_custom_emoji_rejected(exc):
                 plain_markup = _strip_rejected_custom_emoji(bot, markup)
-                return await send_photo_screen(bot, chat_id, card, caption, plain_markup)
+                return await send_photo_screen(
+                    bot, chat_id, card, caption, plain_markup
+                )
             if attempt_fid is not None:
                 card_cache.invalidate_file_id(bkey, card.cache_key)
                 continue
-            logger.exception("Не удалось отправить фото-экран пользователю %s: %s", chat_id, exc)
+            logger.exception("Не удалось отправить фото-экран пользователю %s", chat_id)
             raise
     return 0
 
@@ -242,9 +263,13 @@ async def send_screen(
 ) -> int:
     """Текстовый запасной вариант отправки экрана."""
     if clear_reply_keyboard:
-        sent = await bot.send_message(chat_id=chat_id, text=text, reply_markup=ReplyKeyboardRemove())
+        sent = await bot.send_message(
+            chat_id=chat_id, text=text, reply_markup=ReplyKeyboardRemove()
+        )
         message_id = int(getattr(sent, "message_id", 0) or 0)
-        if message_id and await safe_edit_message_text(bot, chat_id, message_id, text, reply_markup):
+        if message_id and await safe_edit_message_text(
+            bot, chat_id, message_id, text, reply_markup
+        ):
             return message_id
 
     sent = await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)

@@ -90,7 +90,9 @@ class AdminRegistry:
         if user_id in self._ids:
             return True
         if not self._ids:
-            logger.warning("В базе нет активных администраторов — восстанавливаю список из .env")
+            logger.warning(
+                "В базе нет активных администраторов — восстанавливаю список из .env"
+            )
             await self.startup()
             return user_id in self._ids
         return False
@@ -102,12 +104,32 @@ class AdminRegistry:
         admin = await self._db.get_admin(user_id)
         return admin is not None and admin.is_owner
 
+    async def is_viewer(self, user_id: int | None) -> bool:
+        """Проверка роли ``viewer`` (только просмотр без права действий)."""
+        if not user_id or not await self.is_admin(user_id):
+            return False
+        admin = await self._db.get_admin(user_id)
+        return admin is not None and admin.is_viewer
+
+    async def can_act(self, user_id: int | None) -> bool:
+        """Может ли администратор менять статус броней и создавать записи."""
+        if not user_id or not await self.is_admin(user_id):
+            return False
+        admin = await self._db.get_admin(user_id)
+        if admin is None:
+            return True
+        return admin.can_act
+
     async def role_title(self, user_id: int | None) -> str:
         """Человеческое название роли администратора (для приветствия)."""
         if not user_id:
             return AdminRole.title(AdminRole.OPERATOR)
         admin = await self._db.get_admin(user_id)
-        return admin.role_title if admin is not None else AdminRole.title(AdminRole.OPERATOR)
+        return (
+            admin.role_title
+            if admin is not None
+            else AdminRole.title(AdminRole.OPERATOR)
+        )
 
     # ------------------------------------------------------------------ #
     # Запись
@@ -117,8 +139,9 @@ class AdminRegistry:
         await self._db.sync_env_admins(self._cfg.admin_ids)
         return await self.reload()
 
-    def remember(self, user_id: int) -> None:
+    def remember(self, user_id: int, role: str | None = None) -> None:
         """Отметить администратора активным в кэше (после добавления/включения)."""
+        _ = role
         self._ids[user_id] = None
 
     def forget(self, user_id: int) -> None:

@@ -81,11 +81,25 @@ def clean_client_name(raw: str | None) -> str | None:
     name = " ".join(raw.split())
     if not NAME_MIN_LEN <= len(name) <= NAME_MAX_LEN:
         return None
-    if name.startswith("/") or name.startswith("@"):
+    if name.startswith(("/", "@")):
         return None
     if not _NAME_PATTERN.fullmatch(name):
         return None
     return name[:1].upper() + name[1:]
+
+
+def parse_name_and_comment(raw: str | None) -> tuple[str | None, str]:
+    """Разобрать ввод гостя ``Имя`` или ``Имя // комментарий к брони``."""
+    if not raw:
+        return None, ""
+    comment = ""
+    head = raw
+    for sep in ("//", "|"):
+        if sep in raw:
+            head, tail = raw.split(sep, 1)
+            comment = " ".join(tail.split())[:160]
+            break
+    return clean_client_name(head), comment
 
 
 def is_menu_button_text(raw: str | None) -> bool:
@@ -100,6 +114,7 @@ __all__ = [
     "clean_client_name",
     "clean_custom_time",
     "is_menu_button_text",
+    "parse_name_and_comment",
     "tariff_title",
     "time_slot_text",
 ]

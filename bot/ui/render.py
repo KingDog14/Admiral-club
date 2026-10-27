@@ -27,36 +27,61 @@ from aiogram.types import User as TelegramUser
 from bot import texts
 from bot.config import AppConfig
 from bot.db.database import Database
-from bot.db.models import AdminRole, BookingStatus
+from bot.db.models import AdminRole
 from bot.keyboards.inline import (
-    CB_ADMIN_ADD,
-    CB_ADMIN_ADD_CANCEL,
     CB_BOOKING_BACK,
     CB_BOOKING_CANCEL,
+    CB_BRANCH_PREFIX,
+    CB_CLIENT_CANCEL_PREFIX,
     CB_CONSENT_REVOKE,
+    CB_EXTRA_PREFIX,
+    CB_GUESTS_PREFIX,
     CB_PAY_CHECK,
+    CB_PAY_QR,
     CB_PAY_SPOT,
     CB_TARIFF_PREFIX,
     CB_TIME_PREFIX,
-    PENDING_PAGE_SIZE,
-    admin_approve_callback,
-    admin_delete_callback,
-    admin_demote_callback,
-    admin_promote_callback,
-    admin_reject_callback,
-    admin_toggle_callback,
     consent_keyboard,
     revoke_confirm_keyboard,
 )
 from bot.services.admins import AdminRegistry
-from bot.states import DATA_CLIENT_NAME, DATA_TARIFF_KEY, DATA_TIME_KEY, DATA_TIME_SLOT
+from bot.services.club_config import calculate_quote, effective_club_info
+from bot.states import (
+    DATA_BOOKING_DATE,
+    DATA_BRANCH_ID,
+    DATA_CLIENT_NAME,
+    DATA_EXTRAS,
+    DATA_GUEST_COMMENT,
+    DATA_GUESTS_COUNT,
+    DATA_TARIFF_KEY,
+    DATA_TIME_KEY,
+    DATA_TIME_SLOT,
+)
+from bot.ui.admin_views import (
+    render_admin_add,
+    render_admin_admins,
+    render_admin_approved,
+    render_admin_booking_cancel,
+    render_admin_booking_card,
+    render_admin_booking_edit,
+    render_admin_booking_reject,
+    render_admin_branch_item,
+    render_admin_branches,
+    render_admin_card,
+    render_admin_handover,
+    render_admin_home,
+    render_admin_manual,
+    render_admin_notify,
+    render_admin_pending,
+    render_admin_rejected,
+    render_admin_schedule,
+    render_admin_settings,
+    render_admin_tariff_item,
+    render_admin_tariffs,
+)
 from bot.ui.cards import (
-    COL_RED,
     RenderedCard,
     clean_card_text,
-    render_admin_dashboard_card,
-    render_admin_pending_card,
-    render_admin_team_card,
     render_bookings_list_card,
     render_contacts_card,
     render_info_card,
@@ -77,10 +102,8 @@ from bot.ui.screens import (
     BTN_BACK,
     BTN_BOOK_HERO,
     BTN_CANCEL,
-    BTN_HOME,
     BTN_REFRESH,
     BTN_STEP_BACK,
-    SCREEN_BACK,
     ButtonSpec,
     Screen,
     btn,
@@ -88,7 +111,6 @@ from bot.ui.screens import (
     faq_list_keyboard,
     footer_rows,
     keyboard,
-    menu_keyboard,
     nav,
     rules_tabs_keyboard,
     section,
@@ -173,20 +195,17 @@ async def _admin_role_title(ctx: ViewContext) -> str | None:
     return AdminRole.title(AdminRole.OPERATOR)
 
 
-async def _is_owner(ctx: ViewContext) -> bool:
-    if ctx.admins is not None:
-        return await ctx.admins.is_owner(ctx.user_id)
-    admin = await ctx.db.get_admin(ctx.user_id)
-    if admin is not None:
-        return admin.is_owner
-    total, _ = await ctx.db.count_admins()
-    return total == 0 and ctx.user_id == ctx.cfg.admin_id
-
-
 async def _fsm(ctx: ViewContext) -> dict[str, Any]:
     if ctx.state is None:
         return {}
     return await ctx.state.get_data()
+
+
+async def _book_entry_screen(ctx: ViewContext) -> str:
+    """Если активных точек >= 2 — шаг 0 выбор точки, иначе сразу выбор зала."""
+    if await ctx.db.count_active_branches() >= 2:
+        return Screen.BOOK_BRANCH
+    return Screen.BOOK_TARIFF
 
 
 def _with_step_nav(*rows: Sequence[ButtonSpec]) -> InlineKeyboardMarkup:
@@ -210,40 +229,88 @@ def _pairs(items: Sequence[ButtonSpec], per_row: int = 2) -> list[list[ButtonSpe
 # Клиентские экраны
 # --------------------------------------------------------------------------- #
 async def _render_menu(ctx: ViewContext, _arg: str) -> ScreenView:
-    club = ctx.cfg.club
+    club, settings = await effective_club_info(ctx.db, ctx.cfg)
     role_title = await _admin_role_title(ctx)
     is_admin = role_title is not None
     card = render_menu_card(club, is_admin=is_admin, role_title=role_title)
+
     body = texts.render(texts.SCREEN_MENU_BODY, club)
+    welcome_custom = (settings.get("welcome_text") or "").strip()
+    if welcome_custom:
+        body = f"<blockquote>👋 {escape_html(welcome_custom)}</blockquote>\n\n{body}"
     if is_admin:
         body += f"\n🛡 Доступ администратора активен (<b>{escape_html(role_title)}</b>)."
+
+    book_screen = await _book_entry_screen(ctx)
+    rows: list[Sequence[ButtonSpec]] = [
+        [(BTN_BOOK_HERO, nav(book_screen), Surface.HERO, Tone.MINT)],
+        [
+            ("🖥 Залы и цены", nav(Screen.PRICES), Surface.GLASS, Tone.AMBER),
+            ("📋 Мои брони", nav(Screen.BOOKINGS), Surface.GLASS, Tone.SAPPHIRE),
+        ],
+        [
+            ("📘 Правила", nav(Screen.RULES), Surface.GLASS, Tone.INDIGO),
+            ("💡 Вопросы", nav(Screen.FAQ), Surface.GLASS, Tone.TANGERINE),
+        ],
+        [
+            ("📍 Контакты", nav(Screen.CONTACTS), Surface.GLASS, Tone.CRYO),
+            ("🔒 Данные", nav(Screen.PRIVACY), Surface.GLASS, Tone.SLATE),
+        ],
+    ]
+    chat_url = (settings.get("chat_url") or "").strip()
+    if chat_url.startswith(("http://", "https://")):
+        rows.append(
+            [
+                btn(
+                    "💬 Общий чат («вопросы сюда»)",
+                    url=chat_url,
+                    style=Surface.GLASS,
+                    tone=Tone.CRYO,
+                )
+            ]
+        )
+    if is_admin:
+        rows.append(
+            [("🛠 Админ-панель", nav(Screen.ADMIN), Surface.ACCENT, Tone.AMETHYST)]
+        )
+
     return ScreenView(
         card=card,
         caption=_compose(Screen.MENU, club, body),
-        reply_markup=menu_keyboard(is_admin),
+        reply_markup=keyboard(*rows),
     )
 
 
 async def _render_prices(ctx: ViewContext, _arg: str) -> ScreenView:
-    club = ctx.cfg.club
-    night_weekend = " · ".join(f"{t.title} {t.night_weekend} ₽" for t in texts.TARIFFS)
-    body = "\n\n".join(
-        [
-            texts.render(
-                texts.SCREEN_PRICES_BODY,
-                club,
-                morning_slot=texts.MORNING_SLOT,
-                day_slot=texts.DAY_SLOT,
-                night_slot=texts.NIGHT_SLOT,
-            ),
-            texts.render(texts.SCREEN_PRICES_NOTE, club, night_weekend=night_weekend),
-        ]
-    )
+    club, _ = await effective_club_info(ctx.db, ctx.cfg)
+    tariffs = await ctx.db.list_tariffs(active_only=True)
+    extras = await ctx.db.list_tariff_extras(active_only=True)
+    book_screen = await _book_entry_screen(ctx)
+
+    night_weekend = " · ".join(f"{t.title} {t.night_weekend} ₽" for t in tariffs)
+    blocks = [
+        texts.render(
+            texts.SCREEN_PRICES_BODY,
+            club,
+            morning_slot=texts.MORNING_SLOT,
+            day_slot=texts.DAY_SLOT,
+            night_slot=texts.NIGHT_SLOT,
+        ),
+        texts.render(texts.SCREEN_PRICES_NOTE, club, night_weekend=night_weekend),
+    ]
+    if extras:
+        ext_line = " · ".join(
+            f"{e.emoji} {escape_html(e.title)} "
+            + (f"+{e.price} ₽" if e.price else "0 ₽")
+            for e in extras
+        )
+        blocks.append(f"✨ <b>Доп. опции к брони:</b> {ext_line}")
+
     return ScreenView(
-        card=render_prices_card(club),
-        caption=_compose(Screen.PRICES, club, body),
+        card=render_prices_card(club, tariffs=tariffs),
+        caption=_compose(Screen.PRICES, club, "\n\n".join(blocks)),
         reply_markup=footer_rows(
-            [(BTN_BOOK_HERO, nav(Screen.BOOK_TARIFF), Surface.HERO, Tone.MINT)],
+            [(BTN_BOOK_HERO, nav(book_screen), Surface.HERO, Tone.MINT)],
             [
                 ("💡 Частые вопросы", nav(Screen.FAQ), Surface.GLASS, Tone.AMBER),
                 ("📘 Правила", nav(Screen.RULES), Surface.GLASS, Tone.INDIGO),
@@ -253,7 +320,7 @@ async def _render_prices(ctx: ViewContext, _arg: str) -> ScreenView:
 
 
 async def _render_rules(ctx: ViewContext, arg: str) -> ScreenView:
-    club = ctx.cfg.club
+    club, settings = await effective_club_info(ctx.db, ctx.cfg)
     tab = (
         arg
         if arg in (texts.RULES_TAB_MAIN, texts.RULES_TAB_PAY, texts.RULES_TAB_CLUB)
@@ -265,7 +332,7 @@ async def _render_rules(ctx: ViewContext, arg: str) -> ScreenView:
         template = texts.SCREEN_RULES_PAY
         card = render_info_card(
             club,
-            cache_tag="rules_pay",
+            cache_tag=f"rules_pay_{club.payment_card}",
             badge="ПРАВИЛА · ОПЛАТА",
             title="Оплата и защита от мошенников",
             subtitle=f"Единый номер клуба: {club.payment_system} {club.payment_card} ({club.payment_holder})",
@@ -317,7 +384,7 @@ async def _render_rules(ctx: ViewContext, arg: str) -> ScreenView:
         template = texts.SCREEN_RULES_MAIN
         card = render_info_card(
             club,
-            cache_tag="rules_main",
+            cache_tag=f"rules_main_{club.address}",
             badge="ПРАВИЛА КЛУБА",
             title="Правила посещения и брони",
             subtitle=f"г. {club.city}, {club.address} · работаем {club.hours}",
@@ -349,6 +416,16 @@ async def _render_rules(ctx: ViewContext, arg: str) -> ScreenView:
         morning_slot=texts.MORNING_SLOT,
         day_slot=texts.DAY_SLOT,
     )
+    if tab == texts.RULES_TAB_MAIN:
+        penalty = (settings.get("booking_rules_noshow_penalty") or "").strip()
+        lead_h = (settings.get("booking_rules_lead_hours") or "0").strip()
+        if penalty:
+            body += f"\n\n⚠️ <b>Правило неявки:</b> {escape_html(penalty)}"
+        if lead_h and lead_h != "0":
+            body += (
+                f"\n⏱ <b>Минимальное время до визита:</b> за {escape_html(lead_h)} ч."
+            )
+
     return ScreenView(
         card=card,
         caption=_compose(Screen.RULES, club, body, extra=extra),
@@ -357,10 +434,10 @@ async def _render_rules(ctx: ViewContext, arg: str) -> ScreenView:
 
 
 async def _render_faq_list(ctx: ViewContext, _arg: str) -> ScreenView:
-    club = ctx.cfg.club
+    club, _ = await effective_club_info(ctx.db, ctx.cfg)
     card = render_info_card(
         club,
-        cache_tag="faq_list",
+        cache_tag=f"faq_list_{club.payment_card}",
         badge="FAQ · ВОПРОСЫ И ОТВЕТЫ",
         title="Частые вопросы гостей",
         subtitle=f"Короткие и точные ответы по работе кибер-клуба {club.name}",
@@ -387,12 +464,12 @@ async def _render_faq_item(ctx: ViewContext, arg: str) -> ScreenView:
     item = texts.FAQ_BY_KEY.get(arg)
     if item is None:
         return await _render_faq_list(ctx, "")
-    club = ctx.cfg.club
+    club, _ = await effective_club_info(ctx.db, ctx.cfg)
     answer_html = texts.faq_answer(item, club)
     item_tone = FAQ_TONES.get(item.key, Tone.SAPPHIRE)
     card = render_info_card(
         club,
-        cache_tag=f"faq_{item.key}",
+        cache_tag=f"faq_{item.key}_{club.payment_card}",
         badge="ОТВЕТ НА ВОПРОС",
         title=item.question,
         subtitle=f"Клуб {club.place} · {club.hours}",
@@ -411,36 +488,65 @@ async def _render_faq_item(ctx: ViewContext, arg: str) -> ScreenView:
 
 
 async def _render_contacts(ctx: ViewContext, _arg: str) -> ScreenView:
-    club = ctx.cfg.club
-    return ScreenView(
-        card=render_contacts_card(club),
-        caption=_compose(
-            Screen.CONTACTS, club, texts.render(texts.SCREEN_CONTACTS_CARD_BODY, club)
-        ),
-        reply_markup=footer_rows(
+    club, settings = await effective_club_info(ctx.db, ctx.cfg)
+    branches = await ctx.db.list_branches(active_only=True)
+    book_screen = await _book_entry_screen(ctx)
+
+    body = texts.render(texts.SCREEN_CONTACTS_CARD_BODY, club)
+    if len(branches) >= 2:
+        br_lines = [
+            f"📍 <b>{escape_html(b.name)}</b>: {escape_html(b.full_address)} ({escape_html(b.hours)})"
+            for b in branches
+        ]
+        body += "\n\n<b>Наши точки:</b>\n" + "\n".join(br_lines)
+
+    extra_rows: list[Sequence[ButtonSpec]] = [
+        [
+            btn(
+                "💳 Скопировать реквизиты",
+                copy_value=club.payment_card,
+                style=Surface.ACCENT,
+                tone=Tone.SAPPHIRE,
+            ),
+            btn(
+                "📞 Скопировать телефон",
+                copy_value=club.admin_phone,
+                style=Surface.ACCENT,
+                tone=Tone.CRYO,
+            ),
+        ],
+    ]
+    chat_url = (settings.get("chat_url") or "").strip()
+    if chat_url.startswith(("http://", "https://")):
+        extra_rows.append(
             [
                 btn(
-                    "💳 Скопировать реквизиты",
-                    copy_value=club.payment_card,
-                    style=Surface.ACCENT,
-                    tone=Tone.SAPPHIRE,
-                ),
-                btn(
-                    "📞 Скопировать телефон",
-                    copy_value=club.admin_phone,
-                    style=Surface.ACCENT,
+                    "💬 Вопросы сюда (общий чат)",
+                    url=chat_url,
+                    style=Surface.GLASS,
                     tone=Tone.CRYO,
-                ),
-            ],
-            [(BTN_BOOK_HERO, nav(Screen.BOOK_TARIFF), Surface.HERO, Tone.MINT)],
+                )
+            ]
+        )
+    extra_rows.extend(
+        [
+            [(BTN_BOOK_HERO, nav(book_screen), Surface.HERO, Tone.MINT)],
             [("🖥 Залы и цены", nav(Screen.PRICES), Surface.GLASS, Tone.AMBER)],
-        ),
+        ]
+    )
+    return ScreenView(
+        card=render_contacts_card(club),
+        caption=_compose(Screen.CONTACTS, club, body),
+        reply_markup=footer_rows(*extra_rows),
     )
 
 
 async def _render_bookings(ctx: ViewContext, _arg: str) -> ScreenView:
-    club = ctx.cfg.club
+    club, settings = await effective_club_info(ctx.db, ctx.cfg)
     bookings = await ctx.db.list_user_bookings(ctx.user_id, limit=6)
+    allow_cancel = settings.get("booking_rules_allow_cancel") != "0"
+    book_screen = await _book_entry_screen(ctx)
+
     if not bookings:
         body = texts.SCREEN_BOOKINGS_EMPTY
     else:
@@ -454,38 +560,128 @@ async def _render_bookings(ctx: ViewContext, _arg: str) -> ScreenView:
                 ),
                 status=status_tag(booking.status),
             )
+            + (
+                f"\n   💵 Сумма: <b>{booking.quoted_price} ₽</b>"
+                if booking.quoted_price
+                else ""
+            )
             for booking in bookings
         )
+
+    rows: list[Sequence[ButtonSpec]] = []
+    if allow_cancel:
+        cancellable = [b for b in bookings if b.is_pending or b.is_approved][:2]
+        if cancellable:
+            rows.append(
+                [
+                    (
+                        f"🚫 Отменить №{b.id}",
+                        f"{CB_CLIENT_CANCEL_PREFIX}{b.id}",
+                        Surface.DANGER,
+                        Tone.RUBY,
+                    )
+                    for b in cancellable
+                ]
+            )
+    rows.extend(
+        [
+            [(BTN_BOOK_HERO, nav(book_screen), Surface.HERO, Tone.MINT)],
+            [(BTN_REFRESH, nav(Screen.BOOKINGS), Surface.GLASS, Tone.SLATE)],
+        ]
+    )
     return ScreenView(
         card=render_bookings_list_card(club, bookings, ctx.cfg.timezone),
         caption=_compose(Screen.BOOKINGS, club, body),
-        reply_markup=footer_rows(
-            [(BTN_BOOK_HERO, nav(Screen.BOOK_TARIFF), Surface.HERO, Tone.MINT)],
-            [(BTN_REFRESH, nav(Screen.BOOKINGS), Surface.GLASS, Tone.SLATE)],
-        ),
+        reply_markup=footer_rows(*rows),
     )
 
 
 # --------------------------------------------------------------------------- #
-# Мастер бронирования (4 шага)
+# Мастер бронирования (шаг 0 при сети 2+ точек + шаги 1..4)
 # --------------------------------------------------------------------------- #
+async def _render_book_branch(ctx: ViewContext, _arg: str) -> ScreenView:
+    club, _ = await effective_club_info(ctx.db, ctx.cfg)
+    branches = await ctx.db.list_branches(active_only=True)
+    if len(branches) < 2:
+        return await _render_book_tariff(ctx, "")
+
+    lines = ["🏢 <b>Выберите филиал клуба</b>, в котором хотите забронировать место:\n"]
+    for br in branches:
+        lines.append(
+            f"📍 <b>{escape_html(br.name)}</b> — {escape_html(br.full_address)}\n"
+            f"   🕒 {escape_html(br.hours)} · 📞 {escape_html(br.phone or club.admin_phone)}"
+        )
+
+    rows: list[Sequence[ButtonSpec]] = [
+        [
+            (
+                f"📍 {br.name} ({br.city})",
+                f"{CB_BRANCH_PREFIX}{br.id}",
+                Surface.GLASS,
+                Tone.INDIGO,
+            )
+        ]
+        for br in branches
+    ]
+    rows.append(
+        [
+            (BTN_BACK, CB_BOOKING_BACK, Surface.GLASS, Tone.SLATE),
+            (BTN_CANCEL, CB_BOOKING_CANCEL, Surface.DANGER, Tone.RUBY),
+        ]
+    )
+    card = render_info_card(
+        club,
+        cache_tag=f"book_branch_{len(branches)}",
+        badge="ВЫБОР ФИЛИАЛА · СЕТЬ КЛУБОВ",
+        title="В какую точку идём?",
+        subtitle="У каждой точки свои администраторы и свободные игровые места",
+        highlights=[
+            (br.name, f"{br.full_address} · {br.hours}") for br in branches[:3]
+        ],
+        accent=tone_rgba(Tone.INDIGO),
+    )
+    return ScreenView(
+        card=card,
+        caption=_compose(Screen.BOOK_BRANCH, club, "\n".join(lines)),
+        reply_markup=keyboard(*rows),
+    )
+
+
 async def _render_book_tariff(ctx: ViewContext, _arg: str) -> ScreenView:
-    club = ctx.cfg.club
+    data = await _fsm(ctx)
+    branch_id = int(data.get(DATA_BRANCH_ID) or 1)
+    club, _ = await effective_club_info(ctx.db, ctx.cfg, branch_id=branch_id)
+    tariffs = await ctx.db.list_tariffs(active_only=True)
     today = datetime.now(ctx.cfg.timezone).date()
+    weekend = texts.is_weekend(today)
+
+    overview = "\n".join(
+        f"{t.emoji} <b>{escape_html(t.title)}</b> — "
+        f"{t.hour1_weekend if weekend else t.hour1} ₽/ч · "
+        f"3ч {t.hour3_weekend if weekend else t.hour3} ₽ · "
+        f"5ч {t.hour5_weekend if weekend else t.hour5} ₽ · "
+        f"ночь {t.night_weekend if weekend else t.night} ₽"
+        for t in tariffs
+    )
     body = texts.render(
         texts.SCREEN_BOOK_TARIFF_BODY,
         club,
-        tariffs_overview=texts.build_tariffs_overview(),
+        tariffs_overview=overview,
     )
+    if await ctx.db.count_active_branches() >= 2:
+        br = await ctx.db.get_branch(branch_id)
+        if br is not None:
+            body = f"🏢 Филиал: <b>{escape_html(br.name)}</b>\n\n{body}"
+
     rows = _pairs(
         [
             (
-                f"{tariff.emoji} {tariff.title} · {tariff.hour1} ₽/ч",
+                f"{tariff.emoji} {tariff.title} · {tariff.hour1_weekend if weekend else tariff.hour1} ₽/ч",
                 f"{CB_TARIFF_PREFIX}{tariff.key}",
                 Surface.GLASS,
                 TARIFF_TONES.get(tariff.key, Tone.MINT),
             )
-            for tariff in texts.TARIFFS
+            for tariff in tariffs
         ]
     )
     rows.append(
@@ -499,7 +695,7 @@ async def _render_book_tariff(ctx: ViewContext, _arg: str) -> ScreenView:
             club,
             step=1,
             step_label="Выбор зала",
-            is_weekend_day=texts.is_weekend(today),
+            is_weekend_day=weekend,
         ),
         caption=_compose(Screen.BOOK_TARIFF, club, body),
         reply_markup=keyboard(*rows),
@@ -507,9 +703,11 @@ async def _render_book_tariff(ctx: ViewContext, _arg: str) -> ScreenView:
 
 
 async def _render_book_time(ctx: ViewContext, _arg: str) -> ScreenView:
-    club = ctx.cfg.club
     data = await _fsm(ctx)
-    tariff = texts.get_tariff(str(data.get(DATA_TARIFF_KEY) or ""))
+    branch_id = int(data.get(DATA_BRANCH_ID) or 1)
+    club, _ = await effective_club_info(ctx.db, ctx.cfg, branch_id=branch_id)
+    tariff_key = str(data.get(DATA_TARIFF_KEY) or "")
+    tariff = await ctx.db.get_tariff_record(tariff_key) or texts.get_tariff(tariff_key)
     if tariff is None:
         return await _render_book_tariff(ctx, "")
 
@@ -544,9 +742,11 @@ async def _render_book_time(ctx: ViewContext, _arg: str) -> ScreenView:
 
 
 async def _render_book_time_text(ctx: ViewContext, _arg: str) -> ScreenView:
-    club = ctx.cfg.club
     data = await _fsm(ctx)
-    tariff = texts.get_tariff(str(data.get(DATA_TARIFF_KEY) or ""))
+    branch_id = int(data.get(DATA_BRANCH_ID) or 1)
+    club, _ = await effective_club_info(ctx.db, ctx.cfg, branch_id=branch_id)
+    tariff_key = str(data.get(DATA_TARIFF_KEY) or "")
+    tariff = await ctx.db.get_tariff_record(tariff_key) or texts.get_tariff(tariff_key)
     body = texts.render(
         texts.SCREEN_BOOK_TIME_TEXT_BODY,
         club,
@@ -565,54 +765,129 @@ async def _render_book_time_text(ctx: ViewContext, _arg: str) -> ScreenView:
 
 
 async def _render_book_name(ctx: ViewContext, _arg: str) -> ScreenView:
-    club = ctx.cfg.club
     data = await _fsm(ctx)
-    tariff = texts.get_tariff(str(data.get(DATA_TARIFF_KEY) or ""))
+    branch_id = int(data.get(DATA_BRANCH_ID) or 1)
+    club, _ = await effective_club_info(ctx.db, ctx.cfg, branch_id=branch_id)
+    tariff_key = str(data.get(DATA_TARIFF_KEY) or "")
+    tariff = await ctx.db.get_tariff_record(tariff_key) or texts.get_tariff(tariff_key)
+    time_key = str(data.get(DATA_TIME_KEY) or "")
     time_slot = str(data.get(DATA_TIME_SLOT) or "—")
+    guests_count = int(data.get(DATA_GUESTS_COUNT) or 1)
+    selected_extras = list(data.get(DATA_EXTRAS) or [])
+
     today = datetime.now(ctx.cfg.timezone).date()
-    amt = texts.amount_due(
-        tariff.key if tariff else None, str(data.get(DATA_TIME_KEY) or ""), today
+    target_date_str = str(data.get(DATA_BOOKING_DATE) or "")
+    try:
+        target_date = datetime.strptime(target_date_str, "%Y-%m-%d").date()
+    except ValueError:
+        target_date = today
+
+    total_quote, breakdown = await calculate_quote(
+        ctx.db,
+        tariff_key_or_title=tariff_key,
+        time_key_or_slot=time_slot
+        if (not time_key or time_key == texts.TIME_OTHER_KEY)
+        else time_key,
+        day=target_date,
+        guests_count=guests_count,
+        extra_keys=selected_extras,
     )
     amt_str = (
-        f"{amt} ₽" if amt is not None else f"от {tariff.hour1} ₽/ч" if tariff else None
+        f"{total_quote} ₽"
+        if total_quote is not None
+        else (f"от {tariff.hour1} ₽/ч" if tariff else None)
     )
 
-    body = texts.render(
-        texts.SCREEN_BOOK_NAME_BODY,
-        club,
-        tariff=escape_html(tariff.title) if tariff else "—",
-        time_slot=escape_html(time_slot),
+    body = (
+        texts.render(
+            texts.SCREEN_BOOK_NAME_BODY,
+            club,
+            tariff=escape_html(tariff.title) if tariff else "—",
+            time_slot=escape_html(time_slot),
+        )
+        + f"\n\n👥 Гостей: <b>{guests_count}</b> · 💰 Расчёт: <b>{escape_html(breakdown)}</b>"
+        + "\n💡 <i>Комментарий можно указать через <code>//</code>: например <code>Алексей // свой ПК, тихий угол</code></i>"
     )
+
+    extras_catalog = await ctx.db.list_tariff_extras(active_only=True)
+    rows: list[Sequence[ButtonSpec]] = [
+        [
+            (
+                f"{'✅' if guests_count == n else '👤'} {n} чел.",
+                f"{CB_GUESTS_PREFIX}{n}",
+                Surface.GLASS,
+                Tone.MINT if guests_count == n else Tone.SLATE,
+            )
+            for n in (1, 2, 3, 4)
+        ]
+    ]
+    if extras_catalog:
+        ext_buttons: list[ButtonSpec] = [
+            (
+                f"{'🟢' if e.key in selected_extras else '⚪️'} {e.emoji} {e.title}"
+                + (f" (+{e.price}₽)" if e.price else ""),
+                f"{CB_EXTRA_PREFIX}{e.key}",
+                Surface.GLASS,
+                Tone.MINT if e.key in selected_extras else Tone.CRYO,
+            )
+            for e in extras_catalog[:4]
+        ]
+        rows.extend(_pairs(ext_buttons, per_row=2))
+
     return ScreenView(
         card=render_wizard_card(
             club,
             step=3,
-            step_label="Имя гостя",
+            step_label="Гости, опции и имя",
             tariff_key=tariff.key if tariff else None,
             time_slot=time_slot,
             amount_display=amt_str,
         ),
         caption=_compose(Screen.BOOK_NAME, club, body),
-        reply_markup=_with_step_nav(),
+        reply_markup=_with_step_nav(*rows),
     )
 
 
 async def _render_book_pay(ctx: ViewContext, _arg: str) -> ScreenView:
-    club = ctx.cfg.club
     data = await _fsm(ctx)
+    branch_id = int(data.get(DATA_BRANCH_ID) or 1)
+    club, settings = await effective_club_info(ctx.db, ctx.cfg, branch_id=branch_id)
     tariff_key = str(data.get(DATA_TARIFF_KEY) or "")
-    tariff = texts.get_tariff(tariff_key)
+    tariff = await ctx.db.get_tariff_record(tariff_key) or texts.get_tariff(tariff_key)
     time_key = str(data.get(DATA_TIME_KEY) or "")
     time_slot = str(data.get(DATA_TIME_SLOT) or "—")
     client_name = str(data.get(DATA_CLIENT_NAME) or "—")
-    today = datetime.now(ctx.cfg.timezone).date()
-    required = texts.prepayment_required(time_key, today)
+    guests_count = int(data.get(DATA_GUESTS_COUNT) or 1)
+    selected_extras = list(data.get(DATA_EXTRAS) or [])
+    guest_comment = str(data.get(DATA_GUEST_COMMENT) or "")
 
-    amt_val = texts.amount_due(tariff_key, time_key, today)
+    today = datetime.now(ctx.cfg.timezone).date()
+    target_date_str = str(data.get(DATA_BOOKING_DATE) or "")
+    try:
+        target_date = datetime.strptime(target_date_str, "%Y-%m-%d").date()
+    except ValueError:
+        target_date = today
+
+    required = texts.prepayment_required(time_key, target_date)
+    total_quote, breakdown = await calculate_quote(
+        ctx.db,
+        tariff_key_or_title=tariff_key,
+        time_key_or_slot=time_slot
+        if (not time_key or time_key == texts.TIME_OTHER_KEY)
+        else time_key,
+        day=target_date,
+        guests_count=guests_count,
+        extra_keys=selected_extras,
+    )
     amt_card = (
-        f"{amt_val} ₽"
-        if amt_val is not None
+        f"{total_quote} ₽"
+        if total_quote is not None
         else (f"{tariff.hour1} ₽/ч (по прайсу)" if tariff else "По прайсу")
+    )
+    amount_html = (
+        f"<b>{escape_html(breakdown)}</b>"
+        if total_quote is not None
+        else texts.amount_text(tariff_key, time_key, target_date)
     )
 
     body = texts.render(
@@ -621,20 +896,23 @@ async def _render_book_pay(ctx: ViewContext, _arg: str) -> ScreenView:
         tariff=escape_html(tariff.title) if tariff else "—",
         time_slot=escape_html(time_slot),
         client_name=escape_html(client_name),
-        amount=texts.amount_text(tariff_key, time_key, today),
+        amount=amount_html,
         payment_rules=texts.render(
             texts.PAYMENT_RULES_PREPAID if required else texts.PAYMENT_RULES_ON_SPOT,
             club,
         ),
     )
+    if guests_count > 1 or guest_comment:
+        extra_meta = [f"👥 Гостей: <b>{guests_count}</b>"]
+        if guest_comment:
+            extra_meta.append(f"💬 <i>{escape_html(guest_comment[:60])}</i>")
+        body += "\n" + " · ".join(extra_meta)
 
     rows: list[Sequence[ButtonSpec]] = [
         [("📸 Оплатил — отправить чек", CB_PAY_CHECK, Surface.HERO, Tone.MINT)],
     ]
     if not required:
-        rows.append(
-            [("💵 Оплачу на месте", CB_PAY_SPOT, Surface.GLASS, Tone.JADE)]
-        )
+        rows.append([("💵 Оплачу на месте", CB_PAY_SPOT, Surface.GLASS, Tone.JADE)])
     rows.append(
         [
             btn(
@@ -645,12 +923,16 @@ async def _render_book_pay(ctx: ViewContext, _arg: str) -> ScreenView:
             )
         ]
     )
+    if settings.get("payment_photo_file_id"):
+        rows.append(
+            [("🖼 Показать QR / реквизиты", CB_PAY_QR, Surface.GLASS, Tone.AMBER)]
+        )
 
     return ScreenView(
         card=render_wizard_card(
             club,
             step=4,
-            step_label="Способ оплаты",
+            step_label="Итоговая цена и оплата",
             tariff_key=tariff_key,
             time_slot=time_slot,
             client_name=client_name,
@@ -663,23 +945,42 @@ async def _render_book_pay(ctx: ViewContext, _arg: str) -> ScreenView:
 
 
 async def _render_book_receipt(ctx: ViewContext, _arg: str) -> ScreenView:
-    club = ctx.cfg.club
     data = await _fsm(ctx)
+    branch_id = int(data.get(DATA_BRANCH_ID) or 1)
+    club, _ = await effective_club_info(ctx.db, ctx.cfg, branch_id=branch_id)
     tariff_key = str(data.get(DATA_TARIFF_KEY) or "")
-    tariff = texts.get_tariff(tariff_key)
+    tariff = await ctx.db.get_tariff_record(tariff_key) or texts.get_tariff(tariff_key)
     time_key = str(data.get(DATA_TIME_KEY) or "")
+    time_slot = str(data.get(DATA_TIME_SLOT) or "—")
+    guests_count = int(data.get(DATA_GUESTS_COUNT) or 1)
+    selected_extras = list(data.get(DATA_EXTRAS) or [])
+
     today = datetime.now(ctx.cfg.timezone).date()
-    amt_val = texts.amount_due(tariff_key, time_key, today)
+    total_quote, breakdown = await calculate_quote(
+        ctx.db,
+        tariff_key_or_title=tariff_key,
+        time_key_or_slot=time_slot
+        if (not time_key or time_key == texts.TIME_OTHER_KEY)
+        else time_key,
+        day=today,
+        guests_count=guests_count,
+        extra_keys=selected_extras,
+    )
     amt_card = (
-        f"{amt_val} ₽"
-        if amt_val is not None
+        f"{total_quote} ₽"
+        if total_quote is not None
         else (f"{tariff.hour1} ₽/ч" if tariff else "По прайсу")
     )
 
-    body = texts.render(
-        texts.SCREEN_BOOK_RECEIPT_BODY,
-        club,
-        amount=texts.amount_text(tariff_key, time_key, today),
+    body = (
+        texts.render(
+            texts.SCREEN_BOOK_RECEIPT_BODY,
+            club,
+            amount=f"<b>{escape_html(breakdown)}</b>"
+            if total_quote is not None
+            else texts.amount_text(tariff_key, time_key, today),
+        )
+        + "\n📄 Принимаются как <b>фото/скриншот</b>, так и <b>PDF-документ</b> чека."
     )
     return ScreenView(
         card=render_wizard_card(
@@ -687,7 +988,7 @@ async def _render_book_receipt(ctx: ViewContext, _arg: str) -> ScreenView:
             step=4,
             step_label="Ожидание чека",
             tariff_key=tariff_key,
-            time_slot=str(data.get(DATA_TIME_SLOT) or "—"),
+            time_slot=time_slot,
             client_name=str(data.get(DATA_CLIENT_NAME) or "—"),
             amount_display=amt_card,
             waiting_receipt=True,
@@ -716,7 +1017,7 @@ async def _render_book_done(ctx: ViewContext, arg: str) -> ScreenView:
     if booking is None:
         return await _render_menu(ctx, "")
 
-    club = ctx.cfg.club
+    club, _ = await effective_club_info(ctx.db, ctx.cfg, branch_id=booking.branch_id)
     body = texts.render(
         texts.SCREEN_BOOK_DONE_BODY,
         club,
@@ -730,6 +1031,8 @@ async def _render_book_done(ctx: ViewContext, arg: str) -> ScreenView:
             else texts.SCREEN_DONE_PAID_SPOT
         ),
     )
+    if booking.quoted_price is not None:
+        body += f"\n💰 Сумма к оплате: <b>{booking.quoted_price} ₽</b> (гостей: {booking.guests_count})"
     return ScreenView(
         card=render_ticket_card(club, booking),
         caption=_compose(Screen.BOOK_DONE, club, body),
@@ -743,10 +1046,10 @@ async def _render_book_done(ctx: ViewContext, arg: str) -> ScreenView:
 # 152-ФЗ: согласие, политика ПДн и отзыв согласия
 # --------------------------------------------------------------------------- #
 async def _render_consent(ctx: ViewContext, _arg: str) -> ScreenView:
-    club = ctx.cfg.club
+    club, _ = await effective_club_info(ctx.db, ctx.cfg)
     card = render_info_card(
         club,
-        cache_tag="consent_152fz",
+        cache_tag=f"consent_152fz_{club.name}",
         badge="152-ФЗ · ЗАЩИТА ДАННЫХ",
         title=f"Добро пожаловать в {club.name}",
         subtitle="Подтвердите согласие на обработку данных для бронирования мест",
@@ -770,11 +1073,11 @@ async def _render_consent(ctx: ViewContext, _arg: str) -> ScreenView:
 
 
 async def _render_privacy(ctx: ViewContext, _arg: str) -> ScreenView:
-    club = ctx.cfg.club
+    club, _ = await effective_club_info(ctx.db, ctx.cfg)
     card = render_info_card(
         club,
-        cache_tag="privacy_152fz",
-        badge="152-ФЗ · ПЕРСОНАЛЬНЫЕ ДАННЫЕ",
+        cache_tag=f"privacy_152fz_{club.name}",
+        badge="152-ФЗ · ПЕРСОНАЛЬНЫЕ ДАННЫХ",
         title="Обработка персональных данных",
         subtitle=f"Оператор: {club.name}, г. {club.city}, {club.address}",
         highlights=[
@@ -802,7 +1105,7 @@ async def _render_privacy(ctx: ViewContext, _arg: str) -> ScreenView:
 
 
 async def _render_privacy_confirm(ctx: ViewContext, _arg: str) -> ScreenView:
-    club = ctx.cfg.club
+    club, _ = await effective_club_info(ctx.db, ctx.cfg)
     card = render_info_card(
         club,
         cache_tag="privacy_confirm",
@@ -819,7 +1122,7 @@ async def _render_privacy_confirm(ctx: ViewContext, _arg: str) -> ScreenView:
                 "В любой момент кнопкой «Я согласен» или командой /start.",
             ),
         ],
-        accent=COL_RED,
+        accent=tone_rgba(Tone.RUBY),
     )
     return ScreenView(
         card=card,
@@ -829,7 +1132,7 @@ async def _render_privacy_confirm(ctx: ViewContext, _arg: str) -> ScreenView:
 
 
 async def _render_consent_revoked(ctx: ViewContext, arg: str) -> ScreenView:
-    club = ctx.cfg.club
+    club, _ = await effective_club_info(ctx.db, ctx.cfg)
     revoked_at = arg or now_full_text(ctx.cfg.timezone)
     card = render_info_card(
         club,
@@ -844,7 +1147,7 @@ async def _render_consent_revoked(ctx: ViewContext, arg: str) -> ScreenView:
                 f"Напишите администратору: {club.admin_phone} ({club.admin_name}).",
             ),
         ],
-        accent=COL_RED,
+        accent=tone_rgba(Tone.RUBY),
     )
     body = texts.render(texts.CONSENT_REVOKED, club, revoked_at=escape_html(revoked_at))
     return ScreenView(
@@ -852,333 +1155,6 @@ async def _render_consent_revoked(ctx: ViewContext, arg: str) -> ScreenView:
         caption=_compose(Screen.CONSENT_REVOKED, club, body),
         reply_markup=consent_keyboard(),
     )
-
-
-# --------------------------------------------------------------------------- #
-# Админ-панель
-# --------------------------------------------------------------------------- #
-async def _render_admin(ctx: ViewContext, _arg: str) -> ScreenView:
-    club = ctx.cfg.club
-    stats = await ctx.db.get_stats()
-    now_str = now_text(ctx.cfg.timezone)
-    body = texts.render(
-        texts.SCREEN_ADMIN_BODY,
-        club,
-        now=now_str,
-        **stats.as_dict(),
-    )
-    pending_label = (
-        f"📋 Активные брони ({stats.pending})" if stats.pending else "📋 Активные брони"
-    )
-    rows: list[Sequence[ButtonSpec]] = [
-        [
-            (
-                pending_label,
-                nav(Screen.ADMIN_PENDING, 0),
-                Surface.HERO if stats.pending else Surface.ACCENT,
-                Tone.MINT if stats.pending else Tone.SAPPHIRE,
-            )
-        ],
-        [
-            ("👥 Администраторы", nav(Screen.ADMIN_ADMINS), Surface.GLASS, Tone.AMETHYST),
-            (BTN_REFRESH, nav(Screen.ADMIN), Surface.GLASS, Tone.SLATE),
-        ],
-        [
-            (BTN_BACK, nav(SCREEN_BACK), Surface.GLASS, Tone.SLATE),
-            (BTN_HOME, nav(Screen.MENU), Surface.GLASS, Tone.SLATE),
-        ],
-    ]
-    return ScreenView(
-        card=render_admin_dashboard_card(club, stats, now_str),
-        caption=_compose(Screen.ADMIN, club, body),
-        reply_markup=keyboard(*rows),
-    )
-
-
-async def _render_admin_pending(ctx: ViewContext, arg: str) -> ScreenView:
-    club = ctx.cfg.club
-    try:
-        page = max(0, int(arg))
-    except (TypeError, ValueError):
-        page = 0
-
-    total = await ctx.db.count_bookings(BookingStatus.PENDING)
-    pages = max(1, (total + PENDING_PAGE_SIZE - 1) // PENDING_PAGE_SIZE)
-    page = min(page, pages - 1)
-
-    entries = await ctx.db.list_bookings_with_users(
-        BookingStatus.PENDING,
-        limit=PENDING_PAGE_SIZE,
-        offset=page * PENDING_PAGE_SIZE,
-        oldest_first=True,
-    )
-
-    if not entries:
-        body = texts.SCREEN_ADMIN_PENDING_EMPTY
-    else:
-        today = datetime.now(ctx.cfg.timezone).date()
-        body = "\n\n".join(
-            texts.SCREEN_ADMIN_PENDING_ITEM.format(
-                booking_id=booking.id,
-                tariff=escape_html(booking.tariff),
-                time_slot=escape_html(booking.time_slot),
-                client_name=escape_html(booking.client_name),
-                client_link=user.link
-                if user is not None
-                else f"ID <code>{booking.user_id}</code>",
-                created=format_datetime(
-                    booking.created_at, ctx.cfg.timezone, "%d.%m %H:%M"
-                ),
-                amount=_amount_text(booking.tariff, booking.time_slot, today),
-            )
-            for booking, user in entries
-        )
-
-    rows: list[Sequence[ButtonSpec]] = [
-        [
-            (
-                f"✅ №{booking.id}",
-                admin_approve_callback(booking.id),
-                Surface.HERO,
-                Tone.MINT,
-            ),
-            (
-                f"❌ №{booking.id}",
-                admin_reject_callback(booking.id),
-                Surface.DANGER,
-                Tone.RUBY,
-            ),
-        ]
-        for booking, _user in entries
-    ]
-    if pages > 1:
-        rows.append(
-            [
-                ("⬅️", nav(Screen.ADMIN_PENDING, max(0, page - 1)), Surface.GLASS, Tone.SLATE),
-                (f"📄 {page + 1}/{pages}", nav(Screen.ADMIN_PENDING, page), Surface.GLASS, Tone.SLATE),
-                ("➡️", nav(Screen.ADMIN_PENDING, min(pages - 1, page + 1)), Surface.GLASS, Tone.SLATE),
-            ]
-        )
-    rows.append([(BTN_REFRESH, nav(Screen.ADMIN_PENDING, page), Surface.GLASS, Tone.SLATE)])
-    rows.append(
-        [
-            (BTN_BACK, nav(SCREEN_BACK), Surface.GLASS, Tone.SLATE),
-            (BTN_HOME, nav(Screen.MENU), Surface.GLASS, Tone.SLATE),
-        ]
-    )
-    extra = f"стр. {page + 1}/{pages}" if pages > 1 else ""
-    return ScreenView(
-        card=render_admin_pending_card(
-            club,
-            entries,
-            total_pending=total,
-            page=page,
-            pages=pages,
-            tz=ctx.cfg.timezone,
-        ),
-        caption=_compose(Screen.ADMIN_PENDING, club, body, extra=extra),
-        reply_markup=keyboard(*rows),
-    )
-
-
-async def _render_admin_admins(ctx: ViewContext, _arg: str) -> ScreenView:
-    club = ctx.cfg.club
-    admins = await ctx.db.list_admins()
-    viewer_is_owner = await _is_owner(ctx)
-    total, active = await ctx.db.count_admins()
-
-    blocks = [
-        texts.render(
-            texts.SCREEN_ADMIN_ADMINS_BODY,
-            club,
-            admins_total=total,
-            admins_active=active,
-        )
-    ]
-    if not admins:
-        blocks.append(texts.ADMINS_EMPTY.strip())
-    if not viewer_is_owner:
-        viewer = await ctx.db.get_admin(ctx.user_id)
-        role = (
-            viewer.role_title
-            if viewer is not None
-            else AdminRole.title(AdminRole.OPERATOR)
-        )
-        blocks.append(texts.ADMIN_MANAGE_FORBIDDEN.format(role=role))
-
-    rows: list[Sequence[ButtonSpec]] = []
-    for admin in admins:
-        label = await _admin_short_label(ctx, admin.user_id)
-        mark = "👑" if admin.is_owner else "👤"
-        state = "🟢" if admin.is_active else "🔴"
-        adm_tone = (
-            Tone.RUBY
-            if not admin.is_active
-            else (Tone.AMBER if admin.is_owner else Tone.MINT)
-        )
-        rows.append(
-            [
-                (
-                    f"{state} {mark} {label}",
-                    nav(Screen.ADMIN_ADMIN, admin.user_id),
-                    Surface.GLASS,
-                    adm_tone,
-                )
-            ]
-        )
-    if viewer_is_owner:
-        rows.append([("➕ Добавить", CB_ADMIN_ADD, Surface.HERO, Tone.MINT)])
-    rows.append([(BTN_REFRESH, nav(Screen.ADMIN_ADMINS), Surface.GLASS, Tone.SLATE)])
-    rows.append(
-        [
-            (BTN_BACK, nav(SCREEN_BACK), Surface.GLASS, Tone.SLATE),
-            (BTN_HOME, nav(Screen.MENU), Surface.GLASS, Tone.SLATE),
-        ]
-    )
-    return ScreenView(
-        card=render_admin_team_card(club, admins),
-        caption=_compose(Screen.ADMIN_ADMINS, club, "\n\n".join(blocks)),
-        reply_markup=keyboard(*rows),
-    )
-
-
-async def _render_admin_card(ctx: ViewContext, arg: str) -> ScreenView:
-    try:
-        target_id = int(arg)
-    except (TypeError, ValueError):
-        return await _render_admin_admins(ctx, "")
-
-    admin = await ctx.db.get_admin(target_id)
-    if admin is None:
-        return await _render_admin_admins(ctx, "")
-
-    club = ctx.cfg.club
-    all_admins = await ctx.db.list_admins()
-    is_env_owner = admin.user_id == ctx.cfg.admin_id
-    body = texts.render(
-        texts.SCREEN_ADMIN_ADMIN_BODY,
-        club,
-        link=await _admin_label(ctx, admin.user_id),
-        user_id=admin.user_id,
-        role=admin.role_title,
-        state=texts.ADMINS_STATE_ACTIVE
-        if admin.is_active
-        else texts.ADMINS_STATE_DISABLED,
-        added_at=format_datetime(admin.created_at, ctx.cfg.timezone),
-        added_by=await _admin_label(ctx, admin.added_by)
-        if admin.added_by
-        else "из .env",
-    )
-    if is_env_owner:
-        body += f"\n\n{texts.ADMINS_OWNER_ENV_NOTE.strip()}"
-
-    rows: list[Sequence[ButtonSpec]] = []
-    if await _is_owner(ctx) and not is_env_owner:
-        rows.append(
-            [
-                (
-                    "⛔️ Отключить" if admin.is_active else "✅ Включить",
-                    admin_toggle_callback(admin.user_id),
-                    Surface.GLASS if admin.is_active else Surface.HERO,
-                    Tone.AMBER if admin.is_active else Tone.MINT,
-                )
-            ]
-        )
-        role_row: list[ButtonSpec] = []
-        if admin.role != AdminRole.OWNER:
-            role_row.append(
-                (
-                    "👑 Сделать владельцем",
-                    admin_promote_callback(admin.user_id),
-                    Surface.ACCENT,
-                    Tone.AMBER,
-                )
-            )
-        if admin.role != AdminRole.OPERATOR:
-            role_row.append(
-                (
-                    "👤 Сделать оператором",
-                    admin_demote_callback(admin.user_id),
-                    Surface.ACCENT,
-                    Tone.SAPPHIRE,
-                )
-            )
-        if role_row:
-            rows.append(role_row)
-        rows.append(
-            [
-                (
-                    "🗑 Удалить",
-                    admin_delete_callback(admin.user_id),
-                    Surface.DANGER,
-                    Tone.RUBY,
-                )
-            ]
-        )
-
-    rows.append(
-        [(BTN_REFRESH, nav(Screen.ADMIN_ADMIN, admin.user_id), Surface.GLASS, Tone.SLATE)]
-    )
-    rows.append(
-        [
-            ("👥 К списку", nav(Screen.ADMIN_ADMINS), Surface.GLASS, Tone.SLATE),
-            (BTN_HOME, nav(Screen.MENU), Surface.GLASS, Tone.SLATE),
-        ]
-    )
-    return ScreenView(
-        card=render_admin_team_card(club, all_admins, selected=admin),
-        caption=_compose(Screen.ADMIN_ADMIN, club, body),
-        reply_markup=keyboard(*rows),
-    )
-
-
-async def _render_admin_add(ctx: ViewContext, _arg: str) -> ScreenView:
-    club = ctx.cfg.club
-    all_admins = await ctx.db.list_admins()
-    body = texts.render(texts.ADMIN_ADD_PROMPT, club)
-    return ScreenView(
-        card=render_admin_team_card(club, all_admins, adding=True),
-        caption=_compose(Screen.ADMIN_ADD, club, body),
-        reply_markup=keyboard([(BTN_CANCEL, CB_ADMIN_ADD_CANCEL, Surface.DANGER, Tone.RUBY)]),
-    )
-
-
-def _amount_text(tariff_title: str, time_slot: str, today: Any) -> str:
-    amount = texts.amount_for_booking(tariff_title, time_slot, today)
-    return f"{amount} ₽" if amount is not None else "по прайсу"
-
-
-async def _admin_label(ctx: ViewContext, user_id: int) -> str:
-    stored = await ctx.db.get_user(user_id)
-    if stored is not None:
-        return stored.link
-    return await _label_from_telegram(ctx, user_id, short=False)
-
-
-async def _admin_short_label(ctx: ViewContext, user_id: int) -> str:
-    stored = await ctx.db.get_user(user_id)
-    if stored is not None:
-        return stored.mention
-    return await _label_from_telegram(ctx, user_id, short=True)
-
-
-async def _label_from_telegram(ctx: ViewContext, user_id: int, *, short: bool) -> str:
-    try:
-        chat = await ctx.bot.get_chat(user_id)
-    except Exception:  # noqa: BLE001
-        logger.debug("Не удалось получить профиль администратора %s", user_id)
-        return f"id{user_id}" if short else f"пользователь (ID: <code>{user_id}</code>)"
-    username = getattr(chat, "username", None)
-    if username:
-        if short:
-            return f"@{username}"
-        return f'<a href="https://t.me/{escape_html(username)}">@{escape_html(username)}</a>'
-    name = getattr(chat, "full_name", None) or getattr(chat, "first_name", None)
-    if name:
-        return (
-            str(name) if short else f"{escape_html(name)} (ID: <code>{user_id}</code>)"
-        )
-    return f"id{user_id}" if short else f"пользователь (ID: <code>{user_id}</code>)"
 
 
 # --------------------------------------------------------------------------- #
@@ -1194,6 +1170,7 @@ _RENDERERS: dict[str, Renderer] = {
     Screen.FAQ_ITEM: _render_faq_item,
     Screen.CONTACTS: _render_contacts,
     Screen.BOOKINGS: _render_bookings,
+    Screen.BOOK_BRANCH: _render_book_branch,
     Screen.BOOK_TARIFF: _render_book_tariff,
     Screen.BOOK_TIME: _render_book_time,
     Screen.BOOK_TIME_TEXT: _render_book_time_text,
@@ -1205,11 +1182,26 @@ _RENDERERS: dict[str, Renderer] = {
     Screen.PRIVACY: _render_privacy,
     Screen.PRIVACY_CONFIRM: _render_privacy_confirm,
     Screen.CONSENT_REVOKED: _render_consent_revoked,
-    Screen.ADMIN: _render_admin,
-    Screen.ADMIN_PENDING: _render_admin_pending,
-    Screen.ADMIN_ADMINS: _render_admin_admins,
-    Screen.ADMIN_ADMIN: _render_admin_card,
-    Screen.ADMIN_ADD: _render_admin_add,
+    Screen.ADMIN: render_admin_home,
+    Screen.ADMIN_PENDING: render_admin_pending,
+    Screen.ADMIN_APPROVED: render_admin_approved,
+    Screen.ADMIN_REJECTED: render_admin_rejected,
+    Screen.ADMIN_BOOKING: render_admin_booking_card,
+    Screen.ADMIN_BOOKING_REJECT: render_admin_booking_reject,
+    Screen.ADMIN_BOOKING_CANCEL: render_admin_booking_cancel,
+    Screen.ADMIN_BOOKING_EDIT: render_admin_booking_edit,
+    Screen.ADMIN_MANUAL: render_admin_manual,
+    Screen.ADMIN_SCHEDULE: render_admin_schedule,
+    Screen.ADMIN_TARIFFS: render_admin_tariffs,
+    Screen.ADMIN_TARIFF_ITEM: render_admin_tariff_item,
+    Screen.ADMIN_BRANCHES: render_admin_branches,
+    Screen.ADMIN_BRANCH_ITEM: render_admin_branch_item,
+    Screen.ADMIN_ADMINS: render_admin_admins,
+    Screen.ADMIN_ADMIN: render_admin_card,
+    Screen.ADMIN_ADD: render_admin_add,
+    Screen.ADMIN_HANDOVER: render_admin_handover,
+    Screen.ADMIN_NOTIFY: render_admin_notify,
+    Screen.ADMIN_SETTINGS: render_admin_settings,
 }
 
 
