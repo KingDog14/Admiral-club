@@ -261,7 +261,6 @@ async def cmd_admin(
     """Открыть экран админ-панели (запасной вход помимо кнопки в меню)."""
     await _keep_navigation(state)
     navigator = _navigate(message, db=db, cfg=cfg, state=state, admins=admins)
-    await state.update_data(**{DATA_SCREEN_STACK: [{"s": Screen.MENU, "a": ""}]})
     await navigator.show(Screen.ADMIN, push=False)
     logger.info(
         "Админ-панель открыта командой: %s",
@@ -280,14 +279,6 @@ async def cmd_admins(
     """Открыть список администраторов клуба."""
     await _keep_navigation(state)
     navigator = _navigate(message, db=db, cfg=cfg, state=state, admins=admins)
-    await state.update_data(
-        **{
-            DATA_SCREEN_STACK: [
-                {"s": Screen.MENU, "a": ""},
-                {"s": Screen.ADMIN, "a": ""},
-            ]
-        }
-    )
     await navigator.show(Screen.ADMIN_ADMINS, push=False)
     logger.info(
         "Список администраторов открыл %s",

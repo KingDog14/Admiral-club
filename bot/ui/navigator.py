@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from aiogram import Bot
 from aiogram.fsm.context import FSMContext
@@ -24,10 +25,17 @@ from aiogram.types import User as TelegramUser
 
 from bot.config import AppConfig
 from bot.db.database import Database
+from bot.db.models import BookingStatus
 from bot.services.admins import AdminRegistry
 from bot.states import DATA_SCREEN, DATA_SCREEN_MESSAGE, DATA_SCREEN_STACK
 from bot.ui.render import CAPTION_LIMIT, ScreenView, ViewContext, render_screen
-from bot.ui.screens import SCREEN_BACK, Screen
+from bot.ui.screens import (
+    PARENT_PRESERVES_ARG,
+    SCREEN_BACK,
+    SCREEN_PARENTS,
+    SCREEN_TITLES,
+    Screen,
+)
 from bot.utils.formatting import truncate, truncate_html
 from bot.utils.telegram import (
     safe_delete_message,
@@ -150,6 +158,28 @@ class Navigator:
             user=self.user,
         )
 
+    def _infer_from_callback_message(self) -> dict[str, str] | None:
+        """Восстановить текущий экран по заголовку сообщения (после перезапуска RAM)."""
+        if self.callback is None or self.callback.message is None:
+            return None
+        raw = self.callback.message.caption or self.callback.message.text or ""
+        if not raw:
+            return None
+        first_line = raw.splitlines()[0]
+        # В FAQ и FAQ_ITEM заголовок одинаковый — различаем по приглашению списка.
+        if SCREEN_TITLES[Screen.FAQ] in first_line:
+            if "Выберите вопрос" in raw:
+                return _entry(Screen.FAQ)
+            return _entry(Screen.FAQ_ITEM)
+        for scr, title in SCREEN_TITLES.items():
+            if scr in (Screen.FAQ, Screen.FAQ_ITEM):
+                continue
+            if title and title in first_line:
+                num_match = re.search(r"№(\d+)", raw)
+                inferred_arg = num_match.group(1) if num_match else ""
+                return _entry(scr, inferred_arg)
+        return None
+
     async def current(self) -> dict[str, str]:
         entry = (await self.state.get_data()).get(DATA_SCREEN)
         if isinstance(entry, dict) and entry.get(_KEY_SCREEN):
@@ -157,15 +187,30 @@ class Navigator:
                 _KEY_SCREEN: str(entry[_KEY_SCREEN]),
                 _KEY_ARG: str(entry.get(_KEY_ARG) or ""),
             }
+        inferred = self._infer_from_callback_message()
+        if inferred is not None:
+            return inferred
         return _entry(Screen.MENU)
 
-    async def _stack(self) -> list[dict[str, str]]:
-        stack = (await self.state.get_data()).get(DATA_SCREEN_STACK)
-        if not isinstance(stack, list):
-            return []
-        return [
-            item for item in stack if isinstance(item, dict) and item.get(_KEY_SCREEN)
-        ]
+    async def resolve_parent(self, screen: str, arg: str = "") -> tuple[str, str]:
+        """Определить родительский экран в глобальной иерархии интерфейса."""
+        if screen == Screen.ADMIN_BOOKING:
+            try:
+                booking_id = int(arg)
+            except (TypeError, ValueError):
+                return Screen.ADMIN, ""
+            booking = await self.db.get_booking(booking_id)
+            if booking is None:
+                return Screen.ADMIN, ""
+            if booking.status == BookingStatus.APPROVED:
+                return Screen.ADMIN_APPROVED, "0"
+            if booking.status == BookingStatus.REJECTED:
+                return Screen.ADMIN_REJECTED, "0"
+            return Screen.ADMIN_PENDING, "0"
+
+        parent = SCREEN_PARENTS.get(screen, Screen.MENU)
+        parent_arg = arg if screen in PARENT_PRESERVES_ARG else ""
+        return parent, parent_arg
 
     # --- переходы ----------------------------------------------------------- #
     async def show(
@@ -182,43 +227,22 @@ class Navigator:
             return
 
         arg = str(arg)
-        previous = await self.current()
-        prev_screen = previous.get(_KEY_SCREEN)
-        same = prev_screen == screen and str(previous.get(_KEY_ARG) or "") == arg
-        # Переключение вкладок внутри «Правил» не засоряет стек «Назад».
-        same_rules_tab = prev_screen == Screen.RULES and screen == Screen.RULES
-
-        stack = await self._stack()
-        if (
-            push
-            and not same
-            and not same_rules_tab
-            and prev_screen
-            and prev_screen != Screen.CONSENT
-        ):
-            stack.append(previous)
-
         await self.state.update_data(
             **{
                 DATA_SCREEN: _entry(screen, arg),
-                DATA_SCREEN_STACK: stack[-STACK_LIMIT:],
+                DATA_SCREEN_STACK: [],
             }
         )
         await self.redraw(note=note)
 
     async def back(self) -> None:
-        """Вернуться на предыдущий экран; если стек пуст — в главное меню."""
-        stack = await self._stack()
-        if not stack:
-            await self.show(Screen.MENU, push=False)
-            return
-        previous = stack.pop()
-        await self.state.update_data(**{DATA_SCREEN_STACK: stack})
-        await self.show(
-            str(previous.get(_KEY_SCREEN) or Screen.MENU),
-            str(previous.get(_KEY_ARG) or ""),
-            push=False,
+        """Подняться на один уровень вверх в глобальной иерархии интерфейса."""
+        cur = await self.current()
+        parent_screen, parent_arg = await self.resolve_parent(
+            cur.get(_KEY_SCREEN) or Screen.MENU,
+            cur.get(_KEY_ARG) or "",
         )
+        await self.show(parent_screen, parent_arg, push=False)
 
     async def refresh(self) -> None:
         """Перерисовать текущий экран свежими данными."""

@@ -240,7 +240,8 @@ ADMIN_ONLY_SCREENS: Final[frozenset[str]] = frozenset(
     }
 )
 
-#: Экраны-шаги бронирования: на них «Назад» ведёт на предыдущий шаг.
+#: Экраны-шаги бронирования: внутри мастера «Шаг назад» ведёт к предыдущему шагу,
+#: а выход кнопкой «Назад» поднимает в глобальное главное меню.
 BOOKING_SCREENS: Final[frozenset[str]] = frozenset(
     {
         Screen.BOOK_BRANCH,
@@ -250,6 +251,70 @@ BOOKING_SCREENS: Final[frozenset[str]] = frozenset(
         Screen.BOOK_NAME,
         Screen.BOOK_PAY,
         Screen.BOOK_RECEIPT,
+    }
+)
+
+#: Строгая глобальная иерархия экранов («родительский раздел» для кнопки «⬅️ Назад»).
+#: Кнопка «Назад» ВСЕГДА поднимает пользователя на один уровень вверх в глобальном
+#: дереве интерфейса, а не отматывает хронологическую историю прошлых действий.
+SCREEN_PARENTS: Final[dict[str, str]] = {
+    # Корень интерфейса
+    Screen.MENU: Screen.MENU,
+    # Клиентские разделы 1-го уровня → Главное меню
+    Screen.PRICES: Screen.MENU,
+    Screen.RULES: Screen.MENU,
+    Screen.FAQ: Screen.MENU,
+    Screen.CONTACTS: Screen.MENU,
+    Screen.BOOKINGS: Screen.MENU,
+    Screen.PRIVACY: Screen.MENU,
+    Screen.BOOK_DONE: Screen.MENU,
+    # Клиентские экраны 2-го уровня → их родительский раздел
+    Screen.FAQ_ITEM: Screen.FAQ,
+    Screen.PRIVACY_CONFIRM: Screen.PRIVACY,
+    # Раздел бронирования в глобальной иерархии подчиняется Главному меню
+    Screen.BOOK_BRANCH: Screen.MENU,
+    Screen.BOOK_TARIFF: Screen.MENU,
+    Screen.BOOK_TIME: Screen.MENU,
+    Screen.BOOK_TIME_TEXT: Screen.MENU,
+    Screen.BOOK_NAME: Screen.MENU,
+    Screen.BOOK_PAY: Screen.MENU,
+    Screen.BOOK_RECEIPT: Screen.MENU,
+    # Экраны согласия 152-ФЗ
+    Screen.CONSENT: Screen.CONSENT,
+    Screen.CONSENT_REVOKED: Screen.CONSENT_REVOKED,
+    # Корень админ-панели → Главное меню
+    Screen.ADMIN: Screen.MENU,
+    # Разделы админ-панели 1-го уровня → Главный экран админ-панели
+    Screen.ADMIN_PENDING: Screen.ADMIN,
+    Screen.ADMIN_APPROVED: Screen.ADMIN,
+    Screen.ADMIN_REJECTED: Screen.ADMIN,
+    Screen.ADMIN_MANUAL: Screen.ADMIN,
+    Screen.ADMIN_SCHEDULE: Screen.ADMIN,
+    Screen.ADMIN_TARIFFS: Screen.ADMIN,
+    Screen.ADMIN_BRANCHES: Screen.ADMIN,
+    Screen.ADMIN_ADMINS: Screen.ADMIN,
+    Screen.ADMIN_NOTIFY: Screen.ADMIN,
+    Screen.ADMIN_SETTINGS: Screen.ADMIN,
+    # Карточки сущностей 2-го уровня админ-панели → их списки
+    Screen.ADMIN_BOOKING: Screen.ADMIN_PENDING,
+    Screen.ADMIN_TARIFF_ITEM: Screen.ADMIN_TARIFFS,
+    Screen.ADMIN_BRANCH_ITEM: Screen.ADMIN_BRANCHES,
+    Screen.ADMIN_ADMIN: Screen.ADMIN_ADMINS,
+    Screen.ADMIN_ADD: Screen.ADMIN_ADMINS,
+    # Действия над конкретной сущностью 3-го уровня → карточка этой сущности
+    Screen.ADMIN_BOOKING_REJECT: Screen.ADMIN_BOOKING,
+    Screen.ADMIN_BOOKING_CANCEL: Screen.ADMIN_BOOKING,
+    Screen.ADMIN_BOOKING_EDIT: Screen.ADMIN_BOOKING,
+    Screen.ADMIN_HANDOVER: Screen.ADMIN_ADMIN,
+}
+
+#: Подэкраны, чей ``arg`` (ID брони или ID администратора) передаётся родительской карточке.
+PARENT_PRESERVES_ARG: Final[frozenset[str]] = frozenset(
+    {
+        Screen.ADMIN_BOOKING_REJECT,
+        Screen.ADMIN_BOOKING_CANCEL,
+        Screen.ADMIN_BOOKING_EDIT,
+        Screen.ADMIN_HANDOVER,
     }
 )
 
@@ -493,8 +558,10 @@ __all__ = [
     "BTN_REFRESH",
     "BTN_STEP_BACK",
     "HUD_WIDTH",
+    "PARENT_PRESERVES_ARG",
     "SCREEN_BACK",
     "SCREEN_ICONS",
+    "SCREEN_PARENTS",
     "SCREEN_TITLES",
     "ButtonSpec",
     "Screen",

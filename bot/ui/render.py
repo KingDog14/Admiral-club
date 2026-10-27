@@ -668,7 +668,8 @@ async def _render_book_tariff(ctx: ViewContext, _arg: str) -> ScreenView:
         club,
         tariffs_overview=overview,
     )
-    if await ctx.db.count_active_branches() >= 2:
+    has_multi_branches = await ctx.db.count_active_branches() >= 2
+    if has_multi_branches:
         br = await ctx.db.get_branch(branch_id)
         if br is not None:
             body = f"🏢 Филиал: <b>{escape_html(br.name)}</b>\n\n{body}"
@@ -686,7 +687,12 @@ async def _render_book_tariff(ctx: ViewContext, _arg: str) -> ScreenView:
     )
     rows.append(
         [
-            (BTN_BACK, CB_BOOKING_BACK, Surface.GLASS, Tone.SLATE),
+            (
+                BTN_STEP_BACK if has_multi_branches else BTN_BACK,
+                CB_BOOKING_BACK,
+                Surface.GLASS,
+                Tone.SLATE,
+            ),
             (BTN_CANCEL, CB_BOOKING_CANCEL, Surface.DANGER, Tone.RUBY),
         ]
     )

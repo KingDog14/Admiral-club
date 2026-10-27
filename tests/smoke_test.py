@@ -2060,13 +2060,22 @@ async def test_cancel_and_outdated(db: Database, cfg: AppConfig) -> None:
         "В ответе про мошенников назван единый номер", cfg.club.payment_card in faq_scam
     )
 
-    # Возврат по стеку: faq_item(scam) → faq_item(night) → faq → prices → menu
+    # Глобальная иерархия «Назад»: faq_item(scam) → faq → menu (без отката по прошлым действиям)
     back1 = await go(SCREEN_BACK)
-    check("«Назад» вернул на предыдущий вопрос FAQ", "22:00–08:00" in back1)
+    check(
+        "«Назад» из ответа FAQ поднимает к списку вопросов (а не к прошлому вопросу)",
+        "Выберите вопрос" in back1,
+    )
     back2 = await go(SCREEN_BACK)
-    check("Ещё раз «Назад» — к списку вопросов", "Выберите вопрос" in back2)
+    check(
+        "Ещё раз «Назад» из FAQ поднимает в Главное меню (а не в Цены)",
+        "ГЛАВНОЕ МЕНЮ" in back2,
+    )
     back3 = await go(SCREEN_BACK)
-    check("Ещё раз «Назад» — к ценам, откуда пришли", "ЗАЛЫ И ЦЕНЫ" in back3)
+    check(
+        "Повторное «Назад» на корневом экране остаётся в Главном меню",
+        "ГЛАВНОЕ МЕНЮ" in back3,
+    )
 
     rules_text = await go(Screen.RULES)
     check("Правила открываются экраном", "ПРАВИЛА КЛУБА" in rules_text)
@@ -5347,6 +5356,150 @@ async def test_admin_9_modules() -> None:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+async def test_global_hierarchical_back(db: Database, cfg: AppConfig) -> None:
+    """Проверить, что «⬅️ Назад» работает строго по глобальной иерархии интерфейса,
+    а не возвращает к предыдущему хронологическому действию."""
+    from bot.ui.navigator import Navigator
+    from bot.ui.screens import SCREEN_BACK, SCREEN_TITLES, Screen, ScreenCB
+
+    print(
+        "\n— Глобальная иерархия кнопки «Назад» (без петель и возврата к прошлым действиям) —"
+    )
+    bot = BotSpy()
+    admins = AdminRegistry(db, cfg)
+    await admins.startup()
+    uid = ADMIN_ID
+    await db.upsert_user(uid, "hier_admin", "Админ")
+    await db.set_consent(uid, True)
+    state = make_fsm_context(uid)
+
+    async def go(scr: str, arg: str | int = "") -> str:
+        mark = bot.mark()
+        await client_handlers.cb_navigate(
+            make_callback(
+                ScreenCB(screen=scr, arg=str(arg)).pack(), user_id=uid, bot=bot
+            ),
+            ScreenCB(screen=scr, arg=str(arg)),
+            state,
+            db,
+            cfg,
+            admins,
+        )
+        return "\n".join(bot.step_texts(mark))
+
+    try:
+        # 1. Явная кнопка «К списку вопросов» + «Назад» не зацикливает FAQ ↔ FAQ_ITEM
+        await go(Screen.FAQ)
+        await go(Screen.FAQ_ITEM, "night")
+        await go(Screen.FAQ)
+        txt = await go(SCREEN_BACK)
+        check(
+            "После «К списку вопросов» кнопка «Назад» уводит в Главное меню, а не обратно в вопрос",
+            "ГЛАВНОЕ МЕНЮ" in txt,
+        )
+
+        # 2. Переход в бронь из раздела «Цены» → «Назад» возвращает в Главное меню, а не в «Цены»
+        await go(Screen.PRICES)
+        await go(Screen.BOOK_TARIFF)
+        mark = bot.mark()
+        await client_handlers.cb_booking_back(
+            make_callback(inline_keyboards.CB_BOOKING_BACK, user_id=uid, bot=bot),
+            state,
+            db,
+            cfg,
+            admins,
+        )
+        check(
+            "«Назад» на старте бронирования ведёт в Главное меню (а не в прошлый экран «Цены»)",
+            "ГЛАВНОЕ МЕНЮ" in "\n".join(bot.step_texts(mark))
+            and await state.get_state() is None,
+        )
+
+        # 3. В админке посещение вложенных разделов не ломает выход из главной панели в меню
+        await go(Screen.ADMIN)
+        await go(Screen.ADMIN_TARIFFS)
+        await go(Screen.ADMIN_TARIFF_ITEM, "vip")
+        t1 = await go(SCREEN_BACK)
+        check(
+            "Из тарифа зала «Назад» поднимает в список тарифов",
+            "ТАРИФЫ И ДОП. УСЛУГИ" in t1,
+        )
+        t2 = await go(SCREEN_BACK)
+        check(
+            "Из списка тарифов «Назад» поднимает в корень Админ-панели",
+            "АДМИН-ПАНЕЛЬ" in t2,
+        )
+        t3 = await go(SCREEN_BACK)
+        check(
+            "Из корня Админ-панели «Назад» поднимает в Главное меню",
+            "ГЛАВНОЕ МЕНЮ" in t3,
+        )
+
+        # 4. Листание страниц очереди: «Назад» поднимает в Админ-панель, а не на прошлую страницу
+        await go(Screen.ADMIN_PENDING, 0)
+        await go(Screen.ADMIN_PENDING, 2)
+        tp = await go(SCREEN_BACK)
+        check(
+            "После листания страниц очереди «Назад» поднимает в Админ-панель (а не на стр. 0)",
+            "АДМИН-ПАНЕЛЬ" in tp,
+        )
+
+        # 5. Карточка брони → Изменение → Карточка брони → «Назад» ведёт в очередь, а не обратно в Изменение
+        bk = await db.add_booking(
+            user_id=uid,
+            tariff="VIP",
+            time_slot="19:00–21:00",
+            client_name="Иван",
+            receipt_file_id=None,
+            status=BookingStatus.APPROVED,
+        )
+        await go(Screen.ADMIN_BOOKING, bk.id)
+        await go(Screen.ADMIN_BOOKING_EDIT, bk.id)
+        back_to_card = await go(SCREEN_BACK)
+        check(
+            "Из редактирования брони «Назад» поднимает в карточку брони",
+            f"№{bk.id}" in back_to_card,
+        )
+        back_to_queue = await go(SCREEN_BACK)
+        check(
+            "Из карточки одобренной брони «Назад» поднимает в очередь подтверждённых (а не в редактирование)",
+            "ПОДТВЕРЖДЁННЫЕ СЕГОДНЯ" in back_to_queue,
+        )
+        back_to_adm = await go(SCREEN_BACK)
+        check(
+            "Из очереди подтверждённых «Назад» поднимает в Админ-панель",
+            "АДМИН-ПАНЕЛЬ" in back_to_adm,
+        )
+
+        # 6. Математическая проверка дерева: с ЛЮБОГО экрана цепочка «Назад» за <= 4 шага доходит до MENU без циклов
+        nav_helper = Navigator(
+            bot=bot, db=db, cfg=cfg, state=state, user_id=uid, admins=admins
+        )
+        all_converge = True
+        bad_paths: list[str] = []
+        for scr in SCREEN_TITLES:
+            if scr in (Screen.CONSENT, Screen.CONSENT_REVOKED):
+                continue
+            cur_s = scr
+            cur_a = str(bk.id) if "booking" in scr or "bk_" in scr else str(uid)
+            visited: list[str] = [cur_s]
+            for _ in range(5):
+                if cur_s == Screen.MENU:
+                    break
+                cur_s, cur_a = await nav_helper.resolve_parent(cur_s, cur_a)
+                visited.append(cur_s)
+            if cur_s != Screen.MENU:
+                all_converge = False
+                bad_paths.append(" -> ".join(visited))
+        check(
+            "Иерархия всех экранов образует дерево без циклов с корнем в MENU (<= 4 шагов)",
+            all_converge,
+            "; ".join(bad_paths),
+        )
+    finally:
+        await state.storage.close()
+
+
 # --------------------------------------------------------------------------- #
 # Запуск
 # --------------------------------------------------------------------------- #
@@ -5391,6 +5544,7 @@ async def run_all() -> int:
         await test_graphical_cards(db, cfg)
         await test_migration()
         await test_admin_9_modules()
+        await test_global_hierarchical_back(db, cfg)
     finally:
         await db.close()
         shutil.rmtree(workdir, ignore_errors=True)
