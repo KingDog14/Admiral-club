@@ -62,6 +62,8 @@ from bot.services.schedule import (
     extract_slot_window,
 )
 from bot.states import (
+    DATA_ADMIN_MANUAL,
+    DATA_ADMIN_REJECT_REASON,
     DATA_BOOKING_DATE,
     DATA_BRANCH_ID,
     DATA_CLIENT_NAME,
@@ -79,7 +81,7 @@ from bot.states import (
     BookingFSM,
 )
 from bot.ui.navigator import Navigator
-from bot.ui.screens import ADMIN_ONLY_SCREENS, Screen, ScreenCB
+from bot.ui.screens import ADMIN_ONLY_SCREENS, SCREEN_BACK, Screen, ScreenCB
 from bot.utils.formatting import escape_html, now_full_text
 
 logger = logging.getLogger(__name__)
@@ -543,6 +545,14 @@ async def cb_navigate(
     """Переход между экранами: меню, цены, FAQ, контакты, админ-панель."""
     navigator = _navigate(callback, db=db, cfg=cfg, state=state, admins=admins)
     screen = callback_data.screen
+    arg: str | int = callback_data.arg
+
+    if screen == SCREEN_BACK:
+        cur = await navigator.current()
+        screen, arg = await navigator.resolve_parent(
+            cur.get("s") or Screen.MENU,
+            cur.get("a") or "",
+        )
 
     if screen in ADMIN_SCREENS and not await _is_admin(
         db, cfg, admins, callback.from_user.id
@@ -550,6 +560,12 @@ async def cb_navigate(
         await navigator.alert(texts.ADMIN_NO_ACCESS_ALERT)
         await navigator.show(Screen.MENU, push=False)
         return
+
+    current_data = await state.get_data()
+    has_transient_admin_draft = bool(
+        current_data.get(DATA_ADMIN_MANUAL)
+        or current_data.get(DATA_ADMIN_REJECT_REASON)
+    )
 
     if screen == Screen.BOOK_BRANCH:
         await _keep_navigation(state)
@@ -568,13 +584,15 @@ async def cb_navigate(
             default_br = branches[0].id if branches else 1
             await state.update_data({DATA_BRANCH_ID: default_br})
             await state.set_state(BookingFSM.choosing_tariff)
-    elif screen in (Screen.ADMIN_BOOKING_REJECT, Screen.ADMIN_BOOKING_CANCEL) or (
-        await state.get_state() is not None
+    elif (
+        screen in (Screen.ADMIN_BOOKING_REJECT, Screen.ADMIN_BOOKING_CANCEL)
+        or (await state.get_state() is not None)
+        or (screen != Screen.ADMIN_MANUAL and has_transient_admin_draft)
     ):
         await _keep_navigation(state)
 
     note = texts.BOOKING_CANCELED if callback_data.arg == "cancel" else None
-    await navigator.show(screen, callback_data.arg, note=note)
+    await navigator.show(screen, arg, note=note)
     await navigator.answer()
 
 
@@ -1190,10 +1208,11 @@ async def cb_booking_back(
         return
 
     next_state, screen = _STEP_BACK.get(current, (None, Screen.MENU))
-    await state.set_state(next_state)
     if next_state is None:
-        await navigator.back()
+        await _keep_navigation(state)
+        await navigator.show(Screen.MENU, push=False)
     else:
+        await state.set_state(next_state)
         await navigator.show(screen, push=False)
     await navigator.answer()
 

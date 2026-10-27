@@ -528,7 +528,7 @@ async def render_admin_approved(ctx: ViewContext, arg: str) -> ScreenView:
     )
     rows.append(
         [
-            ("🛠 В панель", nav(Screen.ADMIN), Surface.GLASS, Tone.SLATE),
+            (BTN_BACK, nav(SCREEN_BACK), Surface.GLASS, Tone.SLATE),
             (BTN_HOME, nav(Screen.MENU), Surface.GLASS, Tone.SLATE),
         ]
     )
@@ -641,7 +641,7 @@ async def render_admin_rejected(ctx: ViewContext, arg: str) -> ScreenView:
     )
     rows.append(
         [
-            ("🛠 В панель", nav(Screen.ADMIN), Surface.GLASS, Tone.SLATE),
+            (BTN_BACK, nav(SCREEN_BACK), Surface.GLASS, Tone.SLATE),
             (BTN_HOME, nav(Screen.MENU), Surface.GLASS, Tone.SLATE),
         ]
     )
@@ -907,11 +907,12 @@ async def render_admin_booking_reject(
             ],
             [
                 (
-                    "🎫 Назад к брони",
-                    nav(Screen.ADMIN_BOOKING, booking.id),
+                    BTN_BACK,
+                    nav(SCREEN_BACK),
                     Surface.GLASS,
                     Tone.SLATE,
-                )
+                ),
+                (BTN_HOME, nav(Screen.MENU), Surface.GLASS, Tone.SLATE),
             ],
         ]
     else:
@@ -931,8 +932,8 @@ async def render_admin_booking_reject(
         rows.append(
             [
                 (
-                    "🎫 К карточке брони",
-                    nav(Screen.ADMIN_BOOKING, booking.id),
+                    BTN_BACK,
+                    nav(SCREEN_BACK),
                     Surface.GLASS,
                     Tone.SLATE,
                 ),
@@ -1033,8 +1034,8 @@ async def render_admin_booking_edit(ctx: ViewContext, arg: str) -> ScreenView:
         ],
         [
             (
-                "🎫 К карточке брони",
-                nav(Screen.ADMIN_BOOKING, booking.id),
+                BTN_BACK,
+                nav(SCREEN_BACK),
                 Surface.GLASS,
                 Tone.SLATE,
             ),
@@ -1169,10 +1170,11 @@ async def render_admin_manual(ctx: ViewContext, _arg: str) -> ScreenView:
 
     rows.append(
         [
+            (BTN_BACK, nav(SCREEN_BACK), Surface.GLASS, Tone.SLATE),
             (BTN_CANCEL, f"{CB_ADMIN_MANUAL_PREFIX}cancel", Surface.DANGER, Tone.RUBY),
-            (BTN_HOME, nav(Screen.MENU), Surface.GLASS, Tone.SLATE),
         ]
     )
+    rows.append([(BTN_HOME, nav(Screen.MENU), Surface.GLASS, Tone.SLATE)])
     card = render_info_card(
         club,
         cache_tag=f"adm_manual_{step}_{draft.get('tariff_key')}_{draft.get('guests_count')}",
@@ -1307,7 +1309,7 @@ async def render_admin_schedule(ctx: ViewContext, _arg: str) -> ScreenView:
 
     rows.append(
         [
-            ("🛠 В панель", nav(Screen.ADMIN), Surface.GLASS, Tone.SLATE),
+            (BTN_BACK, nav(SCREEN_BACK), Surface.GLASS, Tone.SLATE),
             (BTN_HOME, nav(Screen.MENU), Surface.GLASS, Tone.SLATE),
         ]
     )
@@ -1412,7 +1414,7 @@ async def render_admin_tariffs(ctx: ViewContext, _arg: str) -> ScreenView:
 
     rows.append(
         [
-            ("🛠 В панель", nav(Screen.ADMIN), Surface.GLASS, Tone.SLATE),
+            (BTN_BACK, nav(SCREEN_BACK), Surface.GLASS, Tone.SLATE),
             (BTN_HOME, nav(Screen.MENU), Surface.GLASS, Tone.SLATE),
         ]
     )
@@ -1476,7 +1478,7 @@ async def render_admin_tariff_item(ctx: ViewContext, arg: str) -> ScreenView:
         )
     rows.append(
         [
-            ("💰 К тарифам", nav(Screen.ADMIN_TARIFFS), Surface.GLASS, Tone.SLATE),
+            (BTN_BACK, nav(SCREEN_BACK), Surface.GLASS, Tone.SLATE),
             (BTN_HOME, nav(Screen.MENU), Surface.GLASS, Tone.SLATE),
         ]
     )
@@ -1554,7 +1556,7 @@ async def render_admin_branches(ctx: ViewContext, _arg: str) -> ScreenView:
         )
     rows.append(
         [
-            ("🛠 В панель", nav(Screen.ADMIN), Surface.GLASS, Tone.SLATE),
+            (BTN_BACK, nav(SCREEN_BACK), Surface.GLASS, Tone.SLATE),
             (BTN_HOME, nav(Screen.MENU), Surface.GLASS, Tone.SLATE),
         ]
     )
@@ -1615,7 +1617,7 @@ async def render_admin_branch_item(ctx: ViewContext, arg: str) -> ScreenView:
         )
     rows.append(
         [
-            ("🏢 К точкам", nav(Screen.ADMIN_BRANCHES), Surface.GLASS, Tone.SLATE),
+            (BTN_BACK, nav(SCREEN_BACK), Surface.GLASS, Tone.SLATE),
             (BTN_HOME, nav(Screen.MENU), Surface.GLASS, Tone.SLATE),
         ]
     )
@@ -1856,7 +1858,7 @@ async def render_admin_card(ctx: ViewContext, arg: str) -> ScreenView:
     )
     rows.append(
         [
-            ("👥 К списку", nav(Screen.ADMIN_ADMINS), Surface.GLASS, Tone.SLATE),
+            (BTN_BACK, nav(SCREEN_BACK), Surface.GLASS, Tone.SLATE),
             (BTN_HOME, nav(Screen.MENU), Surface.GLASS, Tone.SLATE),
         ]
     )
@@ -1920,8 +1922,8 @@ async def render_admin_handover(ctx: ViewContext, arg: str) -> ScreenView:
     rows.append(
         [
             (
-                "🧑‍💼 Назад к карточке",
-                nav(Screen.ADMIN_ADMIN, from_uid),
+                BTN_BACK,
+                nav(SCREEN_BACK),
                 Surface.GLASS,
                 Tone.SLATE,
             ),
@@ -2024,7 +2026,7 @@ async def render_admin_notify(ctx: ViewContext, _arg: str) -> ScreenView:
             ),
         ],
         [
-            ("🛠 В панель", nav(Screen.ADMIN), Surface.GLASS, Tone.SLATE),
+            (BTN_BACK, nav(SCREEN_BACK), Surface.GLASS, Tone.SLATE),
             (BTN_HOME, nav(Screen.MENU), Surface.GLASS, Tone.SLATE),
         ],
     ]
@@ -2135,7 +2137,7 @@ async def render_admin_settings(ctx: ViewContext, _arg: str) -> ScreenView:
 
     rows.append(
         [
-            ("🛠 В панель", nav(Screen.ADMIN), Surface.GLASS, Tone.SLATE),
+            (BTN_BACK, nav(SCREEN_BACK), Surface.GLASS, Tone.SLATE),
             (BTN_HOME, nav(Screen.MENU), Surface.GLASS, Tone.SLATE),
         ]
     )
